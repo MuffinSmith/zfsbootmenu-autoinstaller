@@ -1,6 +1,8 @@
 #!/bin/bash
 
 set -Eeo pipefail
+export DEBIAN_FRONTEND=noninteractive
+export APT_LISTCHANGES_FRONTEND=none
 
 # Automatically set other variables
 DEBIAN_RELEASE="trixie"
@@ -19,6 +21,7 @@ SHARE_PASSWORD="password"
 SMB_SHARE_DIR="/var/lib/zfsbootmenu-share"
 SMB_READY="0"
 SMB_IPS=""
+SNAPSHOT_PACKAGE_ROOT="https://snapshot.debian.org/package/linux"
 
 resolve_desktop_dir() {
 	local target_user=""
@@ -253,16 +256,99 @@ publish_debug_log_over_smb() {
 	fi
 }
 
+download_file() {
+	local url="$1"
+	local output_path="$2"
+
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL "$url" -o "$output_path"
+	elif command -v wget >/dev/null 2>&1; then
+		wget -qO "$output_path" "$url"
+	else
+		echo "Neither curl nor wget is available to download $url"
+		return 1
+	fi
+}
+
+fetch_snapshot_page() {
+	local source_version="$1"
+
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL "${SNAPSHOT_PACKAGE_ROOT}/${source_version}/"
+	elif command -v wget >/dev/null 2>&1; then
+		wget -qO- "${SNAPSHOT_PACKAGE_ROOT}/${source_version}/"
+	else
+		return 1
+	fi
+}
+
+install_live_kernel_headers_from_snapshot() {
+	local kernel_release_base="${KERNEL_VERSION%%+*}"
+	local source_version="${kernel_release_base}-1"
+	local host_arch=""
+	local kernel_abi=""
+	local escaped_kernel_version="${KERNEL_VERSION//+/%2B}"
+	local escaped_kernel_abi=""
+	local archive_match='https://snapshot\.debian\.org/archive/debian/[^"]*'
+	local snapshot_page=""
+	local temp_dir=""
+	local headers_url=""
+	local common_url=""
+	local kbuild_url=""
+
+	host_arch=$(dpkg --print-architecture)
+	kernel_abi="${KERNEL_VERSION%-${host_arch}}"
+	escaped_kernel_abi="${kernel_abi//+/%2B}"
+
+	echo "Attempting to install exact live kernel headers for $KERNEL_VERSION from Debian snapshot..."
+	snapshot_page=$(fetch_snapshot_page "$source_version") || {
+		echo "Unable to retrieve Debian snapshot metadata for $source_version"
+		return 1
+	}
+
+	headers_url=$(printf '%s\n' "$snapshot_page" | grep -oE "${archive_match}/linux-headers-${escaped_kernel_version}_${source_version}_${host_arch}\.deb" | head -n1)
+	common_url=$(printf '%s\n' "$snapshot_page" | grep -oE "${archive_match}/linux-headers-${escaped_kernel_abi}-common_${source_version}_all\.deb" | head -n1)
+	kbuild_url=$(printf '%s\n' "$snapshot_page" | grep -oE "${archive_match}/linux-kbuild-${escaped_kernel_abi}_${source_version}_${host_arch}\.deb" | head -n1)
+
+	if [[ -z "$headers_url" || -z "$common_url" || -z "$kbuild_url" ]]; then
+		echo "Unable to find Debian snapshot packages for the running live kernel $KERNEL_VERSION"
+		return 1
+	fi
+
+	temp_dir=$(mktemp -d)
+	download_file "$common_url" "$temp_dir/common.deb"
+	download_file "$kbuild_url" "$temp_dir/kbuild.deb"
+	download_file "$headers_url" "$temp_dir/headers.deb"
+	apt-get install -y "$temp_dir"/*.deb
+	rm -rf "$temp_dir"
+}
+
+prepare_host_efi_support() {
+	echo "Checking EFI variable access..."
+	if [[ -d /sys/firmware/efi/efivars ]]; then
+		echo "EFI variables are already available."
+		return
+	fi
+
+	mkdir -p /sys/firmware/efi/efivars 2>/dev/null || true
+	mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
+
+	if [[ -d /sys/firmware/efi/efivars ]]; then
+		echo "EFI variables are available."
+	else
+		echo "EFI variables are not mounted yet; the chroot phase will mount efivarfs before creating boot entries."
+	fi
+}
+
 install_live_kernel_headers() {
 	local header_package="linux-headers-$KERNEL_VERSION"
 
 	echo "Installing live kernel headers..."
 	if apt-cache show "$header_package" >/dev/null 2>&1; then
-		apt install -y "$header_package"
+		apt-get install -y "$header_package"
 	else
 		echo "Live kernel header package $header_package is not available in the current repositories."
-		echo "Falling back to linux-headers-amd64 so package installation can continue."
-		apt install -y linux-headers-amd64
+		install_live_kernel_headers_from_snapshot
 	fi
 }
 
@@ -373,13 +459,13 @@ EOF
 
 install_host_packages() {
   echo "Installing necessary packages"
-  apt update
-	apt install -y debootstrap gdisk dkms
+	apt-get update
+	apt-get install -y debootstrap gdisk dkms curl
 	install_live_kernel_headers
-	apt install -y dosfstools efibootmgr curl zfsutils-linux
-	# Setup efivars kernel module
-  echo "Setup efivars kernel module"
-  modprobe efivars
+	apt-get install -y dosfstools efibootmgr zfsutils-linux
+	echo "Loading ZFS module for the live environment"
+	modprobe zfs
+	prepare_host_efi_support
 }
 
 partition_disk() {
