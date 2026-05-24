@@ -142,6 +142,63 @@ sync_system_clock() {
 	echo "Current time after sync attempt: $(date -Iseconds 2>/dev/null || date)"
 }
 
+quiesce_apt_background_tasks() {
+	if ! command -v systemctl >/dev/null 2>&1; then
+		return
+	fi
+
+	systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+	systemctl stop apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+	systemctl kill --kill-who=all apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+}
+
+wait_for_apt_locks() {
+	local lock_file=""
+	local waited=0
+	local timeout_seconds=120
+	local lock_files=(
+		/var/lib/dpkg/lock-frontend
+		/var/lib/dpkg/lock
+		/var/lib/apt/lists/lock
+		/var/cache/apt/archives/lock
+	)
+
+	if ! command -v fuser >/dev/null 2>&1; then
+		return 0
+	fi
+
+	while true; do
+		lock_file=""
+		for candidate in "${lock_files[@]}"; do
+			if [[ -e "$candidate" ]] && fuser "$candidate" >/dev/null 2>&1; then
+				lock_file="$candidate"
+				break
+			fi
+		done
+
+		if [[ -z "$lock_file" ]]; then
+			return 0
+		fi
+
+		if (( waited == 0 )); then
+			echo "Waiting for package manager locks to clear..."
+		fi
+
+		if (( waited >= timeout_seconds )); then
+			echo "Timed out waiting for package manager lock: $lock_file"
+			return 1
+		fi
+
+		sleep 2
+		waited=$((waited + 2))
+	done
+}
+
+apt_get_safe() {
+	wait_for_apt_locks
+	apt-get "$@"
+}
+
 get_local_ipv4_addresses() {
 	hostname -I 2>/dev/null | awk '{
 		for (i = 1; i <= NF; i++) {
@@ -234,8 +291,9 @@ publish_debug_log_over_smb() {
 	if ! command -v smbd >/dev/null 2>&1 || ! command -v smbpasswd >/dev/null 2>&1; then
 		echo "Installing Samba packages for log sharing..."
 		set +e
-		apt-get update
-		apt-get install -y samba
+		quiesce_apt_background_tasks
+		apt_get_safe update
+		apt_get_safe install -y samba
 		install_rc=$?
 		set -e
 		if [[ $install_rc -ne 0 ]]; then
@@ -338,7 +396,7 @@ install_live_kernel_headers_from_snapshot() {
 	download_file "$common_url" "$temp_dir/common.deb"
 	download_file "$kbuild_url" "$temp_dir/kbuild.deb"
 	download_file "$headers_url" "$temp_dir/headers.deb"
-	apt-get install -y "$temp_dir"/*.deb
+	apt_get_safe install -y "$temp_dir"/*.deb
 	rm -rf "$temp_dir"
 }
 
@@ -364,7 +422,7 @@ install_live_kernel_headers() {
 
 	echo "Installing live kernel headers..."
 	if apt-cache show "$header_package" >/dev/null 2>&1; then
-		apt-get install -y "$header_package"
+		apt_get_safe install -y "$header_package"
 	else
 		echo "Live kernel header package $header_package is not available in the current repositories."
 		install_live_kernel_headers_from_snapshot
@@ -478,10 +536,11 @@ EOF
 
 install_host_packages() {
   echo "Installing necessary packages"
-	apt-get update
-	apt-get install -y debootstrap gdisk dkms curl
+	quiesce_apt_background_tasks
+	apt_get_safe update
+	apt_get_safe install -y debootstrap gdisk dkms curl
 	install_live_kernel_headers
-	apt-get install -y dosfstools efibootmgr zfsutils-linux
+	apt_get_safe install -y dosfstools efibootmgr zfsutils-linux
 	echo "Loading ZFS module for the live environment"
 	modprobe zfs
 	prepare_host_efi_support
@@ -611,16 +670,19 @@ enter_chroot() {
 	# Set up EFI filesystem
 	echo "Setting up EFI filesystem..."
 	mkfs.vfat -F32 "$BOOT_DEVICE"
+	boot_uuid=\$(blkid -s UUID -o value "$BOOT_DEVICE")
+	if [[ -z "\$boot_uuid" ]]; then
+		echo "Unable to determine the EFI partition UUID for $BOOT_DEVICE"
+		exit 1
+	fi
 	
 	# Configure fstab entry for EFI
 	echo "Configuring fstab for EFI partition..."
-		cat <<-EOF_FSTAB >> /etc/fstab
-		$(blkid | grep "$BOOT_DEVICE" | cut -d ' ' -f 2) /boot/efi vfat defaults 0 0
-		EOF_FSTAB
+		printf 'UUID=%s /boot/efi vfat defaults 0 0\n' "\$boot_uuid" >> /etc/fstab
 	
 	# Mount EFI partition
 	mkdir -p /boot/efi
-	mount /boot/efi
+	mount "$BOOT_DEVICE" /boot/efi
 	
 	# Install ZFSBootMenu
 	echo "Installing ZFSBootMenu..."
