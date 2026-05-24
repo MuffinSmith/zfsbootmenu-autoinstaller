@@ -805,7 +805,7 @@ enter_chroot() {
 	
 	# Install system utilities
 	echo "Installing system utilities..."
-	apt install -y systemd-timesyncd net-tools iproute2 isc-dhcp-client iputils-ping traceroute curl wget dnsutils ethtool ifupdown tcpdump nmap nano vim htop openssh-server git tmux
+	apt install -y systemd-timesyncd systemd-resolved net-tools iproute2 isc-dhcp-client iputils-ping traceroute curl wget dnsutils ethtool ifupdown tcpdump nmap nano vim htop openssh-server git tmux
 	
 	# Set locale and timezone
 	echo "Configuring locale and timezone..."
@@ -834,7 +834,11 @@ enter_chroot() {
 $networkd_config
 		EOF_NETWORKD
 		systemctl enable systemd-networkd >/dev/null 2>&1 || systemctl enable systemd-networkd
-		systemctl enable systemd-resolved >/dev/null 2>&1 || systemctl enable systemd-resolved
+		if [[ -f /usr/lib/systemd/system/systemd-resolved.service || -f /lib/systemd/system/systemd-resolved.service ]]; then
+			systemctl enable systemd-resolved >/dev/null 2>&1 || systemctl enable systemd-resolved
+		else
+			echo "systemd-resolved service is unavailable; leaving /etc/resolv.conf unchanged."
+		fi
 		systemctl disable systemd-networkd-wait-online.service systemd-networkd-wait-online@.service >/dev/null 2>&1 || true
 	else
 		echo "Skipping automatic first-boot wired network configuration."
@@ -892,8 +896,10 @@ $networkd_config
 
 	# Hand off DNS management to the installed system after all network-dependent setup is done.
 	if [[ "$install_network_configuration" == "1" ]]; then
-		rm -f /etc/resolv.conf
-		ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+		if [[ -f /usr/lib/systemd/system/systemd-resolved.service || -f /lib/systemd/system/systemd-resolved.service ]]; then
+			rm -f /etc/resolv.conf
+			ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+		fi
 	fi
 	
 	EOF
