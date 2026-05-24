@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # Automatically set other variables
+DEBIAN_RELEASE="trixie"
 BOOT_DISK="/dev/nvme0n1"
 BOOT_PART="1"
 POOL_DISK="/dev/nvme0n1"
@@ -9,6 +10,22 @@ POOL_NAME="zroot"
 KERNEL_VERSION=$(uname -r)  # Automatically get current kernel version
 MOUNT_POINT="/mnt"
 ID=$(source /etc/os-release && echo "$ID")  # Get OS ID from /etc/os-release
+
+partition_device() {
+	local disk="$1"
+	local part="$2"
+
+	if [[ "$disk" =~ [0-9]$ ]]; then
+		echo "${disk}p${part}"
+	else
+		echo "${disk}${part}"
+	fi
+}
+
+refresh_device_vars() {
+	BOOT_DEVICE=$(partition_device "$BOOT_DISK" "$BOOT_PART")
+	POOL_DEVICE=$(partition_device "$POOL_DISK" "$POOL_PART")
+}
 
 get_username_and_password(){
   # Prompt user for variables
@@ -38,6 +55,7 @@ select_disk() {
       selected_disk=$(echo "${disks[$((choice - 1))]}" | awk '{print $1}')
       BOOT_DISK="/dev/$selected_disk"
       POOL_DISK="/dev/$selected_disk"
+			refresh_device_vars
       echo "Selected disk: $BOOT_DISK"
       break
     else
@@ -60,58 +78,67 @@ generate_hostid() {
 configure_apt_sources() {
   echo "Configuring APT sources..."
   cat > /etc/apt/sources.list <<EOF
-deb http://deb.debian.org/debian bookworm main contrib non-free-firmware
-deb-src http://deb.debian.org/debian bookworm main contrib non-free-firmware
+deb http://deb.debian.org/debian ${DEBIAN_RELEASE} main contrib non-free-firmware
+deb-src http://deb.debian.org/debian ${DEBIAN_RELEASE} main contrib non-free-firmware
 
-deb http://deb.debian.org/debian-security bookworm-security main contrib non-free-firmware
-deb-src http://deb.debian.org/debian-security/ bookworm-security main contrib non-free-firmware
+deb http://deb.debian.org/debian-security ${DEBIAN_RELEASE}-security main contrib non-free-firmware
+deb-src http://deb.debian.org/debian-security/ ${DEBIAN_RELEASE}-security main contrib non-free-firmware
 
-deb http://deb.debian.org/debian bookworm-updates main contrib non-free-firmware
-deb-src http://deb.debian.org/debian bookworm-updates main contrib non-free-firmware
-
-deb http://deb.debian.org/debian bookworm-backports main contrib non-free-firmware
-deb-src http://deb.debian.org/debian bookworm-backports main contrib non-free-firmware
+deb http://deb.debian.org/debian ${DEBIAN_RELEASE}-updates main contrib non-free-firmware
+deb-src http://deb.debian.org/debian ${DEBIAN_RELEASE}-updates main contrib non-free-firmware
 EOF
 }
 
 install_host_packages() {
   echo "Installing necessary packages"
   apt update
-  apt install -y dosfstools efibootmgr curl debootstrap gdisk dkms zfsutils-linux # Install efibootmgr 
-  # Setup efivards kernel module
+	apt install -y debootstrap gdisk dkms "linux-headers-$KERNEL_VERSION"
+	apt install -y dosfstools efibootmgr curl zfsutils-linux
+	# Setup efivars kernel module
   echo "Setup efivars kernel module"
   modprobe efivars
 }
 
 partition_disk() {
   echo "Partitioning disk $POOL_DISK..."
-  sgdisk --zap-all $POOL_DISK
-  sgdisk -n1:1M:+512M -t1:EF00 $BOOT_DISK
-  sgdisk -n2:0:-10M -t2:BF00 $POOL_DISK
+	zpool labelclear -f "$POOL_DISK" 2>/dev/null || true
+	wipefs -a "$POOL_DISK"
+	if [[ "$BOOT_DISK" != "$POOL_DISK" ]]; then
+		wipefs -a "$BOOT_DISK"
+	fi
+
+	sgdisk --zap-all "$POOL_DISK"
+	if [[ "$BOOT_DISK" != "$POOL_DISK" ]]; then
+		sgdisk --zap-all "$BOOT_DISK"
+	fi
+
+	sgdisk -n"${BOOT_PART}":1M:+512M -t"${BOOT_PART}":EF00 "$BOOT_DISK"
+	sgdisk -n"${POOL_PART}":0:-10M -t"${POOL_PART}":BF00 "$POOL_DISK"
 }
 
 create_zpool() {
   echo "Creating ZFS pool and datasets..."
-  zpool create -f -o ashift=12 -O compression=lz4 -O acltype=posixacl -O xattr=sa -O relatime=on -o autotrim=on -o compatibility=openzfs-2.1-linux -m none $POOL_NAME ${POOL_DISK}p${POOL_PART}
-  zfs create -o mountpoint=none $POOL_NAME/ROOT
-  zfs create -o mountpoint=/ -o canmount=noauto $POOL_NAME/ROOT/$ID
-  zfs create -o mountpoint=/home $POOL_NAME/home
-  zpool set bootfs=$POOL_NAME/ROOT/$ID $POOL_NAME
+	zpool create -f -o ashift=12 -O compression=lz4 -O acltype=posixacl -O xattr=sa -O relatime=on -o autotrim=on -o compatibility=openzfs-2.2-linux -m none "$POOL_NAME" "$POOL_DEVICE"
+	zfs create -o mountpoint=none "$POOL_NAME/ROOT"
+	zfs create -o mountpoint=/ -o canmount=noauto "$POOL_NAME/ROOT/$ID"
+	zfs create -o mountpoint=/home "$POOL_NAME/home"
+	zpool set bootfs="$POOL_NAME/ROOT/$ID" "$POOL_NAME"
 }
 
 export_import_zpool() {
   echo "Exporting and re-importing ZFS pool for mounting..."
-  zpool export $POOL_NAME
-  zpool import -N -R $MOUNT_POINT $POOL_NAME
-  zfs mount $POOL_NAME/ROOT/$ID
-  zfs mount $POOL_NAME/home
+	zpool export "$POOL_NAME"
+	zpool import -N -R "$MOUNT_POINT" "$POOL_NAME"
+	zfs mount "$POOL_NAME/ROOT/$ID"
+	zfs mount "$POOL_NAME/home"
+	udevadm trigger
 }
 
 setup_base_system() {
   echo "Installing base system with debootstrap..."
-  debootstrap bookworm $MOUNT_POINT
-  cp /etc/hostid $MOUNT_POINT/etc/hostid
-  cp /etc/resolv.conf $MOUNT_POINT/etc/resolv.conf
+	debootstrap "$DEBIAN_RELEASE" "$MOUNT_POINT"
+	cp /etc/hostid "$MOUNT_POINT/etc/hostid"
+	cp /etc/resolv.conf "$MOUNT_POINT/etc/resolv.conf"
 }
 
 prepare_chroot() {
@@ -131,37 +158,27 @@ enter_chroot() {
 	
 	# Configure apt sources
 		cat > /etc/apt/sources.list <<-EOF_APT
-		deb http://deb.debian.org/debian bookworm main contrib non-free-firmware
-		deb-src http://deb.debian.org/debian bookworm main contrib non-free-firmware
+		deb http://deb.debian.org/debian ${DEBIAN_RELEASE} main contrib non-free-firmware
+		deb-src http://deb.debian.org/debian ${DEBIAN_RELEASE} main contrib non-free-firmware
 		
-		deb http://deb.debian.org/debian-security bookworm-security main contrib non-free-firmware
-		deb-src http://deb.debian.org/debian-security/ bookworm-security main contrib non-free-firmware
+		deb http://deb.debian.org/debian-security ${DEBIAN_RELEASE}-security main contrib non-free-firmware
+		deb-src http://deb.debian.org/debian-security/ ${DEBIAN_RELEASE}-security main contrib non-free-firmware
 		
-		deb http://deb.debian.org/debian bookworm-updates main contrib non-free-firmware
-		deb-src http://deb.debian.org/debian bookworm-updates main contrib non-free-firmware
-		
-		deb http://deb.debian.org/debian bookworm-backports main contrib non-free-firmware
-		deb-src http://deb.debian.org/debian bookworm-backports main contrib non-free-firmware
+		deb http://deb.debian.org/debian ${DEBIAN_RELEASE}-updates main contrib non-free-firmware
+		deb-src http://deb.debian.org/debian ${DEBIAN_RELEASE}-updates main contrib non-free-firmware
 		EOF_APT
 	
 	# Update and install necessary packages
 	export DEBIAN_FRONTEND=noninteractive
 	apt update
-	apt install -y locales linux-headers-$KERNEL_VERSION linux-image-amd64 dkms
-	
-	apt install -y zfsutils-linux
-	
-	apt install -y zfs-initramfs dosfstools efibootmgr curl
+	apt install -y locales keyboard-configuration console-setup
+	apt install -y linux-headers-amd64 linux-image-amd64 zfs-initramfs dosfstools efibootmgr curl
 	
 	echo "REMAKE_INITRD=yes" > /etc/dkms/zfs.conf
 	
 	# Install system utilities
 	echo "Installing system utilities..."
 	apt install -y systemd-timesyncd net-tools iproute2 isc-dhcp-client iputils-ping traceroute curl wget dnsutils ethtool ifupdown tcpdump nmap nano vim htop openssh-server git tmux
-	
-	# Perform system upgrade
-	echo "Running dist-upgrade to upgrade all packages to the latest version..."
-	apt full-upgrade -y
 	
 	# Set locale and timezone
 	echo "Configuring locale and timezone..."
@@ -195,12 +212,12 @@ enter_chroot() {
 	
 	# Set up EFI filesystem
 	echo "Setting up EFI filesystem..."
-	mkfs.vfat -F32 ${BOOT_DISK}p${BOOT_PART}
+	mkfs.vfat -F32 "$BOOT_DEVICE"
 	
 	# Configure fstab entry for EFI
 	echo "Configuring fstab for EFI partition..."
 		cat <<-EOF_FSTAB >> /etc/fstab
-		$(blkid | grep "${BOOT_DISK}p${BOOT_PART}" | cut -d ' ' -f 2) /boot/efi vfat defaults 0 0
+		$(blkid | grep "$BOOT_DEVICE" | cut -d ' ' -f 2) /boot/efi vfat defaults 0 0
 		EOF_FSTAB
 	
 	# Mount EFI partition
@@ -220,19 +237,10 @@ enter_chroot() {
 	mount -t efivarfs efivarfs /sys/firmware/efi/efivars
 	
 	# Install and configure EFI boot manager
-	apt install -y efibootmgr
 	echo "Configuring EFI boot entries..."
 	efibootmgr -c -d "$BOOT_DISK" -p "$BOOT_PART" -L "ZFSBootMenu (Backup)" -l '\EFI\ZBM\VMLINUZ-BACKUP.EFI'
 	efibootmgr -c -d "$BOOT_DISK" -p "$BOOT_PART" -L "ZFSBootMenu" -l '\EFI\ZBM\VMLINUZ.EFI'
 	efibootmgr -c -d "$BOOT_DISK" -p "$BOOT_PART" -L "ZFSBootMenu" -l '\EFI\BOOT\bootx64.efi'
-	
-	# Perform a distribution upgrade
-	echo "Running dist-upgrade to upgrade all packages to the latest version..."
-	apt full-upgrade -y
-	
-	# add full debian setup (tasksel)
-	echo "tasksel"
-	tasksel install standard
 	
 	EOF
 }
@@ -254,6 +262,7 @@ final_cleanup() {
 
 # Execution sequence
 echo "Starting ZFS Boot Menu installation..."
+refresh_device_vars
 select_disk
 get_username_and_password
 generate_hostid
