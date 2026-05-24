@@ -282,6 +282,25 @@ fetch_snapshot_page() {
 	fi
 }
 
+extract_snapshot_package_url() {
+	local snapshot_page="$1"
+	local package_pattern="$2"
+	local package_url=""
+
+	package_url=$(printf '%s\n' "$snapshot_page" | grep -oE "(https://snapshot\.debian\.org)?/archive/debian/[^"]*/${package_pattern}" | head -n1 || true)
+
+	case "$package_url" in
+		https://snapshot.debian.org/*)
+			printf '%s\n' "$package_url"
+			;;
+		/archive/*)
+			printf '%s\n' "https://snapshot.debian.org${package_url}"
+			;;
+	esac
+
+	return 0
+}
+
 install_live_kernel_headers_from_snapshot() {
 	local kernel_release_base="${KERNEL_VERSION%%+*}"
 	local source_version="${kernel_release_base}-1"
@@ -289,7 +308,6 @@ install_live_kernel_headers_from_snapshot() {
 	local kernel_abi=""
 	local escaped_kernel_version="${KERNEL_VERSION//+/%2B}"
 	local escaped_kernel_abi=""
-	local archive_match='https://snapshot\.debian\.org/archive/debian/[^"]*'
 	local snapshot_page=""
 	local temp_dir=""
 	local headers_url=""
@@ -306,9 +324,9 @@ install_live_kernel_headers_from_snapshot() {
 		return 1
 	}
 
-	headers_url=$(printf '%s\n' "$snapshot_page" | grep -oE "${archive_match}/linux-headers-${escaped_kernel_version}_${source_version}_${host_arch}\.deb" | head -n1)
-	common_url=$(printf '%s\n' "$snapshot_page" | grep -oE "${archive_match}/linux-headers-${escaped_kernel_abi}-common_${source_version}_all\.deb" | head -n1)
-	kbuild_url=$(printf '%s\n' "$snapshot_page" | grep -oE "${archive_match}/linux-kbuild-${escaped_kernel_abi}_${source_version}_${host_arch}\.deb" | head -n1)
+	headers_url=$(extract_snapshot_package_url "$snapshot_page" "linux-headers-${escaped_kernel_version}_${source_version}_${host_arch}\.deb")
+	common_url=$(extract_snapshot_package_url "$snapshot_page" "linux-headers-${escaped_kernel_abi}-common_${source_version}_all\.deb")
+	kbuild_url=$(extract_snapshot_package_url "$snapshot_page" "linux-kbuild-${escaped_kernel_abi}_${source_version}_${host_arch}\.deb")
 
 	if [[ -z "$headers_url" || -z "$common_url" || -z "$kbuild_url" ]]; then
 		echo "Unable to find Debian snapshot packages for the running live kernel $KERNEL_VERSION"
