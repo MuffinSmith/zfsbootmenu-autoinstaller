@@ -13,6 +13,12 @@ KERNEL_VERSION=$(uname -r)  # Automatically get current kernel version
 MOUNT_POINT="/mnt"
 ID=$(source /etc/os-release && echo "$ID")  # Get OS ID from /etc/os-release
 DEBUG_LOG=""
+SHARE_NAME="zfsbootmenu"
+SHARE_USER="user"
+SHARE_PASSWORD="password"
+SMB_SHARE_DIR="/var/lib/zfsbootmenu-share"
+SMB_READY="0"
+SMB_IPS=""
 
 resolve_desktop_dir() {
 	local target_user=""
@@ -133,6 +139,133 @@ sync_system_clock() {
 	echo "Current time after sync attempt: $(date -Iseconds 2>/dev/null || date)"
 }
 
+get_local_ipv4_addresses() {
+	hostname -I 2>/dev/null | awk '{
+		for (i = 1; i <= NF; i++) {
+			if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $i != "127.0.0.1") {
+				print $i
+			}
+		}
+	}'
+}
+
+print_smb_access_details() {
+	local ip
+
+	if [[ -z "$SMB_IPS" ]]; then
+		SMB_IPS=$(get_local_ipv4_addresses | paste -sd ' ' -)
+	fi
+
+	if [[ -z "$SMB_IPS" ]]; then
+		echo "Unable to determine a non-loopback IPv4 address for this live system."
+		return
+	fi
+
+	echo "SMB share credentials: ${SHARE_USER}/${SHARE_PASSWORD}"
+	for ip in $SMB_IPS; do
+		echo "SMB log share: \\\\${ip}\\${SHARE_NAME}"
+		echo "Windows path: \\\\${ip}\\${SHARE_NAME}"
+	done
+}
+
+ensure_share_user() {
+	if ! id "$SHARE_USER" >/dev/null 2>&1; then
+		useradd -M -s /usr/sbin/nologin "$SHARE_USER"
+	fi
+
+	printf '%s\n%s\n' "$SHARE_PASSWORD" "$SHARE_PASSWORD" | smbpasswd -a -s "$SHARE_USER" >/dev/null
+	smbpasswd -e "$SHARE_USER" >/dev/null
+}
+
+write_samba_config() {
+	cat > /etc/samba/smb.conf <<EOF
+[global]
+   workgroup = WORKGROUP
+   server role = standalone server
+   map to guest = Never
+   obey pam restrictions = no
+   pam password change = no
+   passwd program = /usr/bin/passwd %u
+   unix password sync = no
+   log file = /var/log/samba/log.%m
+   max log size = 1000
+   server min protocol = SMB2
+
+[${SHARE_NAME}]
+   path = ${SMB_SHARE_DIR}
+   browseable = yes
+   read only = yes
+   guest ok = no
+   valid users = ${SHARE_USER}
+EOF
+}
+
+start_samba_service() {
+	pkill smbd 2>/dev/null || true
+
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl restart smbd 2>/dev/null || systemctl start smbd 2>/dev/null || true
+	fi
+
+	if ! pgrep smbd >/dev/null 2>&1; then
+		smbd -D >/dev/null 2>&1 || return 1
+	fi
+
+	pgrep smbd >/dev/null 2>&1
+}
+
+publish_debug_log_over_smb() {
+	local install_rc=0
+
+	if [[ -z "$DEBUG_LOG" || ! -f "$DEBUG_LOG" || "$SMB_READY" == "1" ]]; then
+		return
+	fi
+
+	echo "Preparing SMB log share for Windows access..."
+	mkdir -p "$SMB_SHARE_DIR"
+	cp -f "$DEBUG_LOG" "$SMB_SHARE_DIR/"
+	ln -sfn "$DEBUG_LOG" "$SMB_SHARE_DIR/latest.log"
+	chmod 0755 "$SMB_SHARE_DIR"
+	chmod 0644 "$SMB_SHARE_DIR"/* 2>/dev/null || true
+
+	if ! command -v smbd >/dev/null 2>&1 || ! command -v smbpasswd >/dev/null 2>&1; then
+		echo "Installing Samba packages for log sharing..."
+		set +e
+		apt-get update
+		apt-get install -y samba
+		install_rc=$?
+		set -e
+		if [[ $install_rc -ne 0 ]]; then
+			echo "Unable to install Samba packages automatically."
+			return
+		fi
+	fi
+
+	ensure_share_user || return
+	write_samba_config
+	if start_samba_service; then
+		SMB_READY="1"
+		SMB_IPS=$(get_local_ipv4_addresses | paste -sd ' ' -)
+		echo "SMB log sharing is ready."
+		print_smb_access_details
+	else
+		echo "Failed to start the Samba service for log sharing."
+	fi
+}
+
+install_live_kernel_headers() {
+	local header_package="linux-headers-$KERNEL_VERSION"
+
+	echo "Installing live kernel headers..."
+	if apt-cache show "$header_package" >/dev/null 2>&1; then
+		apt install -y "$header_package"
+	else
+		echo "Live kernel header package $header_package is not available in the current repositories."
+		echo "Falling back to linux-headers-amd64 so package installation can continue."
+		apt install -y linux-headers-amd64
+	fi
+}
+
 log_error() {
 	local line_no="$1"
 	local exit_code="$2"
@@ -150,6 +283,8 @@ log_exit() {
 		if [[ $exit_code -eq 0 ]]; then
 			echo "Debug log saved to: $DEBUG_LOG"
 		else
+			publish_debug_log_over_smb
+			print_smb_access_details
 			echo "Installer failed. Debug log saved to: $DEBUG_LOG"
 		fi
 	fi
@@ -239,7 +374,8 @@ EOF
 install_host_packages() {
   echo "Installing necessary packages"
   apt update
-	apt install -y debootstrap gdisk dkms "linux-headers-$KERNEL_VERSION"
+	apt install -y debootstrap gdisk dkms
+	install_live_kernel_headers
 	apt install -y dosfstools efibootmgr curl zfsutils-linux
 	# Setup efivars kernel module
   echo "Setup efivars kernel module"
