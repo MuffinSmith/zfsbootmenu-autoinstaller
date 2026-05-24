@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -Eeo pipefail
+
 # Automatically set other variables
 DEBIAN_RELEASE="trixie"
 BOOT_DISK="/dev/nvme0n1"
@@ -10,6 +12,96 @@ POOL_NAME="zroot"
 KERNEL_VERSION=$(uname -r)  # Automatically get current kernel version
 MOUNT_POINT="/mnt"
 ID=$(source /etc/os-release && echo "$ID")  # Get OS ID from /etc/os-release
+DEBUG_LOG=""
+
+resolve_desktop_dir() {
+	local target_user=""
+	local target_home=""
+
+	if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+		target_user="${SUDO_USER}"
+	else
+		target_user=$(logname 2>/dev/null || true)
+	fi
+
+	if [[ -n "$target_user" && "$target_user" != "root" ]]; then
+		target_home=$(getent passwd "$target_user" | cut -d: -f6)
+	fi
+
+	if [[ -z "$target_home" ]]; then
+		target_home="${HOME:-/root}"
+	fi
+
+	echo "${target_home}/Desktop"
+}
+
+setup_debug_logging() {
+	local log_dir
+	local timestamp
+
+	log_dir=$(resolve_desktop_dir)
+	if ! mkdir -p "$log_dir" 2>/dev/null; then
+		log_dir="/tmp"
+		mkdir -p "$log_dir"
+	fi
+
+	timestamp=$(date +%Y%m%d-%H%M%S)
+	DEBUG_LOG="${log_dir}/zfsbootmenu-install-${timestamp}.log"
+	: > "$DEBUG_LOG"
+	chmod 0644 "$DEBUG_LOG" 2>/dev/null || true
+	exec > >(tee -a "$DEBUG_LOG") 2>&1
+
+	echo "Debug log: $DEBUG_LOG"
+}
+
+log_environment_snapshot() {
+	echo "=== ZFSBootMenu installer debug context ==="
+	echo "Start time: $(date -Iseconds 2>/dev/null || date)"
+	echo "Target Debian release: $DEBIAN_RELEASE"
+	echo "Live OS ID: $ID"
+	echo "Live kernel: $KERNEL_VERSION"
+	echo "Running as: $(id -un)"
+	echo "Working directory: $(pwd)"
+	echo "--- lsblk ---"
+	lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS
+	echo "-------------"
+}
+
+log_selected_configuration() {
+	echo "Selected boot disk: $BOOT_DISK"
+	echo "Selected pool disk: $POOL_DISK"
+	echo "Boot device: $BOOT_DEVICE"
+	echo "Pool device: $POOL_DEVICE"
+	echo "Pool name: $POOL_NAME"
+	echo "Mount point: $MOUNT_POINT"
+	echo "Hostname: $HOSTNAME"
+	echo "Username: $USERNAME"
+}
+
+log_error() {
+	local line_no="$1"
+	local exit_code="$2"
+
+	echo "ERROR: command failed at line ${line_no} with exit code ${exit_code}"
+	if [[ -n "$DEBUG_LOG" ]]; then
+		echo "Debug log saved to: $DEBUG_LOG"
+	fi
+}
+
+log_exit() {
+	local exit_code=$?
+
+	if [[ -n "$DEBUG_LOG" ]]; then
+		if [[ $exit_code -eq 0 ]]; then
+			echo "Debug log saved to: $DEBUG_LOG"
+		else
+			echo "Installer failed. Debug log saved to: $DEBUG_LOG"
+		fi
+	fi
+}
+
+trap 'log_error $LINENO $?' ERR
+trap 'log_exit' EXIT
 
 partition_device() {
 	local disk="$1"
@@ -152,6 +244,16 @@ prepare_chroot() {
 enter_chroot() {
 	echo "Entering chroot environment to configure system..."
 	chroot $MOUNT_POINT /bin/bash <<-EOF
+	set -Eeo pipefail
+
+	chroot_log_error() {
+		local line_no="\$1"
+		local exit_code="\$2"
+		echo "[chroot] ERROR: command failed at line \${line_no} with exit code \${exit_code}"
+	}
+
+	trap 'chroot_log_error \$LINENO \$?' ERR
+
 	# Set hostname
 	echo "$HOSTNAME" > /etc/hostname
 	echo "127.0.1.1    $HOSTNAME" >> /etc/hosts
@@ -261,10 +363,13 @@ final_cleanup() {
 }
 
 # Execution sequence
+setup_debug_logging
 echo "Starting ZFS Boot Menu installation..."
 refresh_device_vars
+log_environment_snapshot
 select_disk
 get_username_and_password
+log_selected_configuration
 generate_hostid
 configure_apt_sources
 install_host_packages
