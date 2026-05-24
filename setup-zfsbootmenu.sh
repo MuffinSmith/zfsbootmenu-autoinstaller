@@ -564,20 +564,40 @@ partition_disk() {
 }
 
 create_zpool() {
+	local root_dataset="$POOL_NAME/ROOT/$ID"
+	local be_local_datasets=("etc" "opt" "usr" "var" "var/cache" "var/lib" "var/log")
+	local shared_datasets=("home" "media" "srv")
+	local dataset_path=""
+
   echo "Creating ZFS pool and datasets..."
 	zpool create -f -o ashift=12 -O compression=lz4 -O acltype=posixacl -O xattr=sa -O relatime=on -o autotrim=on -o compatibility=openzfs-2.2-linux -m none "$POOL_NAME" "$POOL_DEVICE"
 	zfs create -o mountpoint=none "$POOL_NAME/ROOT"
-	zfs create -o mountpoint=/ -o canmount=noauto "$POOL_NAME/ROOT/$ID"
-	zfs create -o mountpoint=/home "$POOL_NAME/home"
-	zpool set bootfs="$POOL_NAME/ROOT/$ID" "$POOL_NAME"
+	zfs create -o mountpoint=/ -o canmount=noauto "$root_dataset"
+	for dataset_path in "${be_local_datasets[@]}"; do
+		zfs create -o mountpoint="/$dataset_path" "$root_dataset/$dataset_path"
+	done
+	for dataset_path in "${shared_datasets[@]}"; do
+		zfs create -o mountpoint="/$dataset_path" "$POOL_NAME/$dataset_path"
+	done
+	zpool set bootfs="$root_dataset" "$POOL_NAME"
 }
 
 export_import_zpool() {
+	local root_dataset="$POOL_NAME/ROOT/$ID"
+	local be_local_datasets=("etc" "opt" "usr" "var" "var/cache" "var/lib" "var/log")
+	local shared_datasets=("home" "media" "srv")
+	local dataset_path=""
+
   echo "Exporting and re-importing ZFS pool for mounting..."
 	zpool export "$POOL_NAME"
 	zpool import -N -R "$MOUNT_POINT" "$POOL_NAME"
-	zfs mount "$POOL_NAME/ROOT/$ID"
-	zfs mount "$POOL_NAME/home"
+	zfs mount "$root_dataset"
+	for dataset_path in "${be_local_datasets[@]}"; do
+		zfs mount "$root_dataset/$dataset_path"
+	done
+	for dataset_path in "${shared_datasets[@]}"; do
+		zfs mount "$POOL_NAME/$dataset_path"
+	done
 	udevadm trigger
 }
 
