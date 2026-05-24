@@ -370,9 +370,9 @@ log_environment_snapshot
 select_disk
 get_username_and_password
 log_selected_configuration
-generate_hostid
 configure_apt_sources
 install_host_packages
+generate_hostid
 partition_disk
 create_zpool
 export_import_zpool
