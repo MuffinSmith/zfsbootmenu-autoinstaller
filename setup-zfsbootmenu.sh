@@ -286,8 +286,9 @@ extract_snapshot_package_url() {
 	local snapshot_page="$1"
 	local package_pattern="$2"
 	local package_url=""
+	local package_url_pattern='(https://snapshot\.debian\.org)?/archive/debian/[^"]*'
 
-	package_url=$(printf '%s\n' "$snapshot_page" | grep -oE "(https://snapshot\.debian\.org)?/archive/debian/[^"]*/${package_pattern}" | head -n1 || true)
+	package_url=$(printf '%s\n' "$snapshot_page" | grep -oE "${package_url_pattern}/${package_pattern}" | head -n1 || true)
 
 	case "$package_url" in
 		https://snapshot.debian.org/*)
