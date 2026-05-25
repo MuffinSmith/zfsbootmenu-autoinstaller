@@ -1,0 +1,13 @@
+REM Debian live -> open terminal -> sync clock/RTC -> bootstrap ZFSBootMenu installer
+DEFAULT_DELAY 200
+DELAY 5000
+
+CTRL ALT t
+DELAY 1500
+
+STRING sudo -i
+ENTER
+DELAY 1200
+
+STRING { timedatectl set-ntp true > /dev/null 2>&1 && until [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ]; do sleep 1; done; } || { http_date="$(exec 3<>/dev/tcp/deb.debian.org/80; printf 'HEAD / HTTP/1.1\r\nHost: deb.debian.org\r\nConnection: close\r\n\r\n' >&3; tr -d '\r' <&3 | sed -n 's/^Date: //p' | head -n1)"; [ -n "$http_date" ] && date -u -s "$http_date"; } || echo "Clock sync unavailable; continuing with current time"; hwclock --systohc 2>/dev/null || true; apt update && apt upgrade -y && apt install -y curl && curl -fsSLO https://raw.githubusercontent.com/MuffinSmith/zfsbootmenu-autoinstaller/main/setup-zfsbootmenu.sh && chmod +x setup-zfsbootmenu.sh && ./setup-zfsbootmenu.sh
+ENTER
