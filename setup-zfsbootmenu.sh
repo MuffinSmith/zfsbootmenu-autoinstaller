@@ -215,61 +215,6 @@ get_network_configuration() {
 	echo "IPv6 will use router assignment when available."
 }
 
-fetch_network_time() {
-	local network_time=""
-
-	if command -v curl >/dev/null 2>&1; then
-		network_time=$(curl -fsI http://deb.debian.org/ 2>/dev/null | tr -d '\r' | awk 'BEGIN { IGNORECASE = 1 } /^Date:/ { sub(/^[^:]+: /, ""); print; exit }')
-	elif command -v wget >/dev/null 2>&1; then
-		network_time=$(wget -qSO- --spider http://deb.debian.org 2>&1 | tr -d '\r' | awk 'BEGIN { IGNORECASE = 1 } /^  Date:/ { sub(/^  Date: /, ""); print; exit }')
-	fi
-
-	echo "$network_time"
-}
-
-sync_system_clock() {
-	local ntp_state=""
-	local network_time=""
-
-	echo "Checking live system clock..."
-	echo "Current time before sync attempt: $(date -Iseconds 2>/dev/null || date)"
-
-	if command -v hwclock >/dev/null 2>&1; then
-		hwclock --hctosys 2>/dev/null || true
-	fi
-
-	if command -v timedatectl >/dev/null 2>&1; then
-		timedatectl set-ntp true 2>/dev/null || true
-		systemctl restart systemd-timesyncd 2>/dev/null || true
-
-		for _ in 1 2 3 4 5; do
-			ntp_state=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || true)
-			if [[ "$ntp_state" == "yes" || "$ntp_state" == "true" ]]; then
-				break
-			fi
-			sleep 2
-		done
-
-		echo "timedatectl status after sync attempt:"
-		timedatectl status 2>/dev/null || true
-	else
-		echo "timedatectl not available; skipping NTP sync attempt."
-	fi
-
-	ntp_state=${ntp_state:-$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || true)}
-	if [[ "$ntp_state" != "yes" && "$ntp_state" != "true" ]]; then
-		network_time=$(fetch_network_time)
-		if [[ -n "$network_time" ]]; then
-			echo "Applying fallback network time from deb.debian.org: $network_time"
-			date -u -s "$network_time" >/dev/null
-		else
-			echo "Unable to obtain fallback network time; continuing with current clock."
-		fi
-	fi
-
-	echo "Current time after sync attempt: $(date -Iseconds 2>/dev/null || date)"
-}
-
 quiesce_apt_background_tasks() {
 	if ! command -v systemctl >/dev/null 2>&1; then
 		return
@@ -718,7 +663,8 @@ export_import_zpool() {
 
   echo "Exporting and re-importing ZFS pool for mounting..."
 	zpool export "$POOL_NAME"
-	zpool import -N -R "$MOUNT_POINT" "$POOL_NAME"
+	udevadm settle 2>/dev/null || true
+	zpool import -N -R "$MOUNT_POINT" -d "$POOL_DEVICE" "$POOL_NAME"
 	zfs mount "$root_dataset"
 	for dataset_path in "${be_local_datasets[@]}"; do
 		zfs mount "$root_dataset/$dataset_path"
@@ -930,7 +876,6 @@ get_username_and_password
 get_network_configuration
 log_selected_configuration
 configure_apt_sources
-sync_system_clock
 install_host_packages
 generate_hostid
 partition_disk
