@@ -381,11 +381,12 @@ resolve_fedora_zfs_release_rpm() {
 		return 0
 	fi
 
+	echo "Resolving Fedora zfs-release RPM for Fedora $FEDORA_RELEASE" >&2
 	while IFS= read -r candidate; do
-		echo "Checking Fedora zfs-release candidate: $candidate"
+		echo "Checking Fedora zfs-release candidate: $candidate" >&2
 		if [[ -n "$candidate" ]] && url_exists "$candidate"; then
 			FEDORA_ZFS_RELEASE_URL="$candidate"
-			echo "Using Fedora zfs-release RPM: $FEDORA_ZFS_RELEASE_URL"
+			echo "Using Fedora zfs-release RPM: $FEDORA_ZFS_RELEASE_URL" >&2
 			printf '%s\n' "$FEDORA_ZFS_RELEASE_URL"
 			return 0
 		fi
