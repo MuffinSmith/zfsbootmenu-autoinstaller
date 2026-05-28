@@ -21,6 +21,7 @@ TARGET_RELEASE=""
 ID="$LIVE_DISTRO_ID"
 ZPOOL_COMPATIBILITY="openzfs-2.2-linux"
 TARGET_ADMIN_GROUP="sudo"
+FEDORA_ZFS_RELEASE_URL=""
 DEBUG_LOG=""
 SHARE_NAME="zfsbootmenu"
 SHARE_USER="user"
@@ -332,11 +333,11 @@ install_log_sharing_packages() {
 }
 
 dnf_install_live() {
-	dnf -y --releasever="$FEDORA_RELEASE" "$@"
+	dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False "$@"
 }
 
 dnf_install_live_release_only() {
-	dnf -y --releasever="$FEDORA_RELEASE" --disablerepo=updates "$@"
+	dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates "$@"
 }
 
 dnf_install_target() {
@@ -347,8 +348,45 @@ dnf_install_target_release_only() {
 	dnf -y --installroot "$MOUNT_POINT" --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates "$@"
 }
 
-fedora_zfs_release_rpm() {
-	printf '%s\n' "https://zfsonlinux.org/fedora/zfs-release-3-0$(rpm --eval '%{dist}').noarch.rpm"
+url_exists() {
+	local url="$1"
+
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsIL "$url" >/dev/null 2>&1
+	elif command -v wget >/dev/null 2>&1; then
+		wget -q --spider "$url"
+	else
+		return 1
+	fi
+}
+
+fedora_zfs_release_candidates() {
+	printf '%s\n' \
+		"https://zfsonlinux.org/fedora/zfs-release-3-1.fc${FEDORA_RELEASE}.noarch.rpm" \
+		"https://zfsonlinux.org/fedora/zfs-release-3-0.fc${FEDORA_RELEASE}.noarch.rpm" \
+		"https://zfsonlinux.org/fedora/zfs-release-2-8.fc${FEDORA_RELEASE}.noarch.rpm" \
+		"https://zfsonlinux.org/fedora/zfs-release-2-6.fc${FEDORA_RELEASE}.noarch.rpm" \
+		"https://zfsonlinux.org/fedora/zfs-release-2-5.fc${FEDORA_RELEASE}.noarch.rpm"
+}
+
+resolve_fedora_zfs_release_rpm() {
+	local candidate=""
+
+	if [[ -n "$FEDORA_ZFS_RELEASE_URL" ]]; then
+		printf '%s\n' "$FEDORA_ZFS_RELEASE_URL"
+		return 0
+	fi
+
+	while IFS= read -r candidate; do
+		if [[ -n "$candidate" ]] && url_exists "$candidate"; then
+			FEDORA_ZFS_RELEASE_URL="$candidate"
+			printf '%s\n' "$FEDORA_ZFS_RELEASE_URL"
+			return 0
+		fi
+	done < <(fedora_zfs_release_candidates)
+
+	echo "Unable to find a compatible zfs-release RPM for Fedora $FEDORA_RELEASE" >&2
+	return 1
 }
 
 fedora_kernel_devel_url() {
@@ -741,11 +779,14 @@ install_host_packages_debian() {
 }
 
 install_host_packages_fedora() {
+	local zfs_release_url=""
+
 	echo "Installing necessary packages"
-	dnf_install_live install gdisk dkms curl wget dosfstools efibootmgr rsync
+	zfs_release_url=$(resolve_fedora_zfs_release_rpm)
+	dnf_install_live install gdisk curl wget dosfstools efibootmgr rsync
 	remove_zfs_fuse_if_present
 	if ! rpm -q zfs-release >/dev/null 2>&1; then
-		dnf_install_live_release_only install "$(fedora_zfs_release_rpm)"
+		dnf_install_live_release_only install "$zfs_release_url"
 	fi
 	dnf_install_live_release_only install "$(fedora_kernel_devel_url)"
 	dnf_install_live_release_only install zfs
@@ -833,15 +874,13 @@ setup_base_system_debian() {
 }
 
 setup_base_system_fedora() {
+	local zfs_release_url=""
 	local base_packages=(
 		@core
 		dnf
 		fedora-release
 		fedora-repos
-		passwd
 		sudo
-		systemd-networkd
-		systemd-resolved
 		openssh-server
 		dosfstools
 		efibootmgr
@@ -864,14 +903,14 @@ setup_base_system_fedora() {
 		rsync
 		kernel
 		dracut
-		dkms
 		glibc-langpack-en
 	)
 
 	echo "Installing base system with dnf installroot..."
 	mkdir -p "$MOUNT_POINT"
+	zfs_release_url=$(resolve_fedora_zfs_release_rpm)
 	dnf_install_target_release_only install "${base_packages[@]}"
-	dnf_install_target_release_only install "$(fedora_zfs_release_rpm)"
+	dnf_install_target_release_only install "$zfs_release_url"
 	dnf_install_target_release_only install "$(fedora_kernel_devel_url)"
 	dnf_install_target_release_only install zfs zfs-dracut
 	cp /etc/hostid "$MOUNT_POINT/etc/hostid"
