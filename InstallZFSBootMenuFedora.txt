@@ -2,8 +2,12 @@ REM Fedora Workstation live -> open terminal -> sync clock/RTC -> bootstrap ZFSB
 DEFAULT_DELAY 200
 DELAY 5000
 
-CTRL ALT t
-DELAY 1500
+ALT F2
+DELAY 1200
+
+STRING bash -lc 'command -v ptyxis >/dev/null 2>&1 && exec ptyxis; command -v gnome-terminal >/dev/null 2>&1 && exec gnome-terminal; command -v kgx >/dev/null 2>&1 && exec kgx; exec xterm'
+ENTER
+DELAY 2500
 
 STRING sudo -i
 ENTER

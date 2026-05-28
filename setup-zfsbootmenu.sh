@@ -418,8 +418,25 @@ write_samba_config() {
    browseable = yes
    read only = yes
    guest ok = no
+   follow symlinks = yes
+   wide links = yes
+   unix extensions = no
    valid users = ${SHARE_USER}
 EOF
+}
+
+configure_samba_share_access() {
+	if command -v getenforce >/dev/null 2>&1; then
+		if [[ "$(getenforce 2>/dev/null || true)" != "Disabled" ]]; then
+			chcon -R -t samba_share_t "$SMB_SHARE_DIR" 2>/dev/null || true
+		fi
+	fi
+
+	if command -v firewall-cmd >/dev/null 2>&1; then
+		if firewall-cmd --state >/dev/null 2>&1; then
+			firewall-cmd --quiet --add-service=samba >/dev/null 2>&1 || true
+		fi
+	fi
 }
 
 start_samba_service() {
@@ -427,6 +444,7 @@ start_samba_service() {
 
 	if command -v systemctl >/dev/null 2>&1; then
 		systemctl restart smbd 2>/dev/null || systemctl start smbd 2>/dev/null || true
+		systemctl restart smb 2>/dev/null || systemctl start smb 2>/dev/null || true
 	fi
 
 	if ! pgrep smbd >/dev/null 2>&1; then
@@ -446,7 +464,7 @@ publish_debug_log_over_smb() {
 	echo "Preparing SMB log share for Windows access..."
 	mkdir -p "$SMB_SHARE_DIR"
 	cp -f "$DEBUG_LOG" "$SMB_SHARE_DIR/"
-	ln -sfn "$DEBUG_LOG" "$SMB_SHARE_DIR/latest.log"
+	cp -f "$DEBUG_LOG" "$SMB_SHARE_DIR/latest.log"
 	chmod 0755 "$SMB_SHARE_DIR"
 	chmod 0644 "$SMB_SHARE_DIR"/* 2>/dev/null || true
 
@@ -464,6 +482,7 @@ publish_debug_log_over_smb() {
 
 	ensure_share_user || return
 	write_samba_config
+	configure_samba_share_access
 	if start_samba_service; then
 		SMB_READY="1"
 		SMB_IPS=$(get_local_ipv4_addresses | paste -sd ' ' -)
