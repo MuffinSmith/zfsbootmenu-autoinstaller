@@ -36,6 +36,9 @@ NETWORK_INTERFACE_MAC=""
 NETWORK_IPV4_CIDR=""
 NETWORK_GATEWAY=""
 NETWORK_DNS_SERVERS=""
+FEDORA_LIVE_INSTALL_MOUNT="/run/install"
+FEDORA_LIVE_INSTALL_TREE=""
+FEDORA_LIVE_INSTALL_MOUNTED="0"
 
 resolve_desktop_dir() {
 	local target_user=""
@@ -404,6 +407,38 @@ remove_zfs_fuse_if_present() {
 	if command -v rpm >/dev/null 2>&1 && rpm -q zfs-fuse >/dev/null 2>&1; then
 		rpm -e --nodeps zfs-fuse
 	fi
+}
+
+prepare_fedora_live_install_tree() {
+	if [[ -n "$FEDORA_LIVE_INSTALL_TREE" ]]; then
+		printf '%s\n' "$FEDORA_LIVE_INSTALL_TREE"
+		return 0
+	fi
+
+	if mountpoint -q "$FEDORA_LIVE_INSTALL_MOUNT"; then
+		FEDORA_LIVE_INSTALL_TREE="$FEDORA_LIVE_INSTALL_MOUNT"
+		printf '%s\n' "$FEDORA_LIVE_INSTALL_TREE"
+		return 0
+	fi
+
+	if mountpoint -q /run/rootfsbase; then
+		FEDORA_LIVE_INSTALL_TREE="/run/rootfsbase"
+		printf '%s\n' "$FEDORA_LIVE_INSTALL_TREE"
+		return 0
+	fi
+
+	if [[ -b /dev/mapper/live-base ]]; then
+		mkdir -p "$FEDORA_LIVE_INSTALL_MOUNT"
+		echo "Mounting Fedora live installation source /dev/mapper/live-base at $FEDORA_LIVE_INSTALL_MOUNT..."
+		mount -o ro /dev/mapper/live-base "$FEDORA_LIVE_INSTALL_MOUNT"
+		FEDORA_LIVE_INSTALL_TREE="$FEDORA_LIVE_INSTALL_MOUNT"
+		FEDORA_LIVE_INSTALL_MOUNTED="1"
+		printf '%s\n' "$FEDORA_LIVE_INSTALL_TREE"
+		return 0
+	fi
+
+	echo "Unable to find the Fedora live installation source. Expected /dev/mapper/live-base or /run/rootfsbase from the Fedora Workstation live image." >&2
+	return 1
 }
 
 get_local_ipv4_addresses() {
@@ -882,53 +917,24 @@ setup_base_system_debian() {
 }
 
 setup_base_system_fedora() {
-	local zfs_release_url=""
-	local base_packages=(
-		@core
-		dnf
-		fedora-release
-		fedora-repos
-		sudo
-		openssh-server
-		dosfstools
-		efibootmgr
-		curl
-		wget
-		net-tools
-		iproute
-		dhcp-client
-		iputils
-		traceroute
-		bind-utils
-		ethtool
-		tcpdump
-		nmap
-		nano
-		vim-enhanced
-		htop
-		git
-		tmux
-		rsync
-		kernel
-		dracut
-		glibc-langpack-en
-	)
+	local install_tree=""
 
-	echo "Installing base system with dnf installroot..."
+	echo "Installing base system from the Fedora live image..."
 	mkdir -p "$MOUNT_POINT"
-	prepare_runtime_mounts
-	zfs_release_url=$(resolve_fedora_zfs_release_rpm)
-	echo "Resolved Fedora target zfs-release RPM: $zfs_release_url"
-	dnf_install_target_release_only --exclude=dracut-config-rescue install "${base_packages[@]}"
-	dnf_install_target_release_only install "$zfs_release_url"
-	dnf_install_target_release_only install "$(fedora_kernel_devel_url)"
-	dnf_install_target_release_only install zfs zfs-dracut
-	cp /etc/hostid "$MOUNT_POINT/etc/hostid"
-	if [[ -e "$MOUNT_POINT/etc/resolv.conf" ]] && [[ /etc/resolv.conf -ef "$MOUNT_POINT/etc/resolv.conf" ]]; then
-		echo "Target resolv.conf already points at the live resolver; leaving it in place."
-	else
-		cp -L /etc/resolv.conf "$MOUNT_POINT/etc/resolv.conf"
+	install_tree=$(prepare_fedora_live_install_tree)
+	echo "Copying Fedora live system from $install_tree to $MOUNT_POINT..."
+	rsync -pogAXtlHrDx \
+		--stats \
+		--exclude=/boot/efi/* \
+		--exclude=/etc/machine-id \
+		--info=progress2 \
+		"$install_tree/" "$MOUNT_POINT"
+	mkdir -p "$MOUNT_POINT/etc"
+	if [[ -e "$MOUNT_POINT/etc/resolv.conf" ]]; then
+		mv "$MOUNT_POINT/etc/resolv.conf" "$MOUNT_POINT/etc/resolv.conf.orig"
 	fi
+	cp -L /etc/resolv.conf "$MOUNT_POINT/etc/resolv.conf"
+	cp /etc/hostid "$MOUNT_POINT/etc/hostid"
 }
 
 setup_base_system() {
@@ -947,12 +953,11 @@ setup_base_system() {
 }
 
 prepare_runtime_mounts() {
-	mkdir -p "$MOUNT_POINT/proc" "$MOUNT_POINT/sys" "$MOUNT_POINT/dev/pts" "$MOUNT_POINT/run"
+	mkdir -p "$MOUNT_POINT/proc" "$MOUNT_POINT/sys" "$MOUNT_POINT/dev/pts"
 	mountpoint -q "$MOUNT_POINT/proc" || mount -t proc proc "$MOUNT_POINT/proc"
 	mountpoint -q "$MOUNT_POINT/sys" || mount -t sysfs sysfs "$MOUNT_POINT/sys"
 	mountpoint -q "$MOUNT_POINT/dev" || mount -B /dev "$MOUNT_POINT/dev"
 	mountpoint -q "$MOUNT_POINT/dev/pts" || mount -t devpts devpts "$MOUNT_POINT/dev/pts"
-	mountpoint -q "$MOUNT_POINT/run" || mount -B /run "$MOUNT_POINT/run"
 }
 
 prepare_chroot() {
@@ -1126,6 +1131,8 @@ enter_chroot_fedora() {
 	local networkd_mode_line=""
 	local dns_server=""
 	local install_network_configuration="0"
+	local zfs_release_url=""
+	local kernel_devel_url=""
 
 	if [[ ( "$NETWORK_MODE" == "dhcp" || "$NETWORK_MODE" == "static" ) && -n "$NETWORK_INTERFACE_MAC" ]]; then
 		install_network_configuration="1"
@@ -1143,6 +1150,11 @@ enter_chroot_fedora() {
 		fi
 		networkd_config+="IPv6AcceptRA=yes"$'\n'
 	fi
+
+	zfs_release_url=$(resolve_fedora_zfs_release_rpm)
+	kernel_devel_url=$(fedora_kernel_devel_url)
+	echo "Resolved Fedora target zfs-release RPM for chroot: $zfs_release_url"
+	echo "Resolved Fedora target kernel-devel RPM for chroot: $kernel_devel_url"
 
 	echo "Entering chroot environment to configure Fedora system..."
 	chroot $MOUNT_POINT /bin/bash <<-EOF
@@ -1169,6 +1181,19 @@ enter_chroot_fedora() {
 	# Set hostname
 	echo "$HOSTNAME" > /etc/hostname
 	echo "127.0.1.1    $HOSTNAME" >> /etc/hosts
+
+	# Install the ZFS packages inside the copied Fedora system, matching the official guide.
+	echo "Installing Fedora ZFS packages inside chroot..."
+	if rpm -q zfs-fuse >/dev/null 2>&1; then
+		rpm -e --nodeps zfs-fuse
+	fi
+	if ! rpm -q zfs-release >/dev/null 2>&1; then
+		dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install "$zfs_release_url"
+	fi
+	if ! rpm -q "kernel-devel-$KERNEL_VERSION" >/dev/null 2>&1; then
+		dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install "$kernel_devel_url"
+	fi
+	dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install zfs zfs-dracut
 
 	# Configure locale
 	echo "Configuring locale..."
@@ -1199,6 +1224,9 @@ enter_chroot_fedora() {
 		cat > /etc/systemd/network/20-installer-primary.network <<-'EOF_NETWORKD'
 $networkd_config
 		EOF_NETWORKD
+		if [[ -f /usr/lib/systemd/system/NetworkManager.service || -f /lib/systemd/system/NetworkManager.service ]]; then
+			systemctl disable NetworkManager.service NetworkManager-wait-online.service >/dev/null 2>&1 || true
+		fi
 		systemctl enable systemd-networkd >/dev/null 2>&1 || systemctl enable systemd-networkd
 		if [[ -f /usr/lib/systemd/system/systemd-resolved.service || -f /lib/systemd/system/systemd-resolved.service ]]; then
 			systemctl enable systemd-resolved >/dev/null 2>&1 || systemctl enable systemd-resolved
@@ -1218,6 +1246,14 @@ $networkd_config
 	if [[ -f /usr/lib/systemd/system/systemd-timesyncd.service || -f /lib/systemd/system/systemd-timesyncd.service ]]; then
 		systemctl enable systemd-timesyncd >/dev/null 2>&1 || systemctl enable systemd-timesyncd
 	fi
+	echo "Configuring headless boot defaults..."
+	if [[ -f /usr/lib/systemd/system/display-manager.service || -f /lib/systemd/system/display-manager.service ]]; then
+		systemctl disable display-manager.service >/dev/null 2>&1 || true
+	fi
+	if [[ -f /usr/lib/systemd/system/gdm.service || -f /lib/systemd/system/gdm.service ]]; then
+		systemctl disable gdm >/dev/null 2>&1 || true
+	fi
+	systemctl set-default multi-user.target >/dev/null 2>&1 || systemctl set-default multi-user.target
 
 	# Configure Dracut for ZFS root imports
 	echo "Configuring Dracut for ZFS..."
@@ -1283,7 +1319,12 @@ $networkd_config
 		if [[ -f /usr/lib/systemd/system/systemd-resolved.service || -f /lib/systemd/system/systemd-resolved.service ]]; then
 			rm -f /etc/resolv.conf
 			ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+			rm -f /etc/resolv.conf.orig
+		elif [[ -f /etc/resolv.conf.orig ]]; then
+			mv -f /etc/resolv.conf.orig /etc/resolv.conf
 		fi
+	elif [[ -f /etc/resolv.conf.orig ]]; then
+		mv -f /etc/resolv.conf.orig /etc/resolv.conf
 	fi
 
 	# Ensure custom files written in the chroot get correct SELinux labels on first boot.
@@ -1309,7 +1350,6 @@ enter_chroot() {
 
 cleanup_chroot() {
   echo "Cleaning up chroot environment..."
-	umount -l "$MOUNT_POINT/run" 2>/dev/null || true
 	umount -l "$MOUNT_POINT/dev/pts" 2>/dev/null || true
 	umount -l "$MOUNT_POINT/dev" 2>/dev/null || true
 	umount -l "$MOUNT_POINT/sys" 2>/dev/null || true
@@ -1320,6 +1360,9 @@ final_cleanup() {
   echo "Exporting ZFS pool and completing installation..."
   mount | grep -v zfs | tac | awk '/\/mnt/ {print $3}' | \
     xargs -i{} umount -lf {}
+	if [[ "$FEDORA_LIVE_INSTALL_MOUNTED" == "1" ]] && mountpoint -q "$FEDORA_LIVE_INSTALL_MOUNT"; then
+		umount -l "$FEDORA_LIVE_INSTALL_MOUNT" 2>/dev/null || true
+	fi
   zpool export -a
 }
 
