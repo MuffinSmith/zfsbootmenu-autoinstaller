@@ -6,6 +6,7 @@ export APT_LISTCHANGES_FRONTEND=none
 
 # Automatically set other variables
 DEBIAN_RELEASE="trixie"
+FEDORA_RELEASE=""
 BOOT_DISK="/dev/nvme0n1"
 BOOT_PART="1"
 POOL_DISK="/dev/nvme0n1"
@@ -13,7 +14,13 @@ POOL_PART="2"
 POOL_NAME="zroot"
 KERNEL_VERSION=$(uname -r)  # Automatically get current kernel version
 MOUNT_POINT="/mnt"
-ID=$(source /etc/os-release && echo "$ID")  # Get OS ID from /etc/os-release
+LIVE_DISTRO_ID=$(source /etc/os-release && echo "$ID")
+LIVE_DISTRO_VERSION=$(source /etc/os-release && echo "$VERSION_ID")
+TARGET_DISTRO=""
+TARGET_RELEASE=""
+ID="$LIVE_DISTRO_ID"
+ZPOOL_COMPATIBILITY="openzfs-2.2-linux"
+TARGET_ADMIN_GROUP="sudo"
 DEBUG_LOG=""
 SHARE_NAME="zfsbootmenu"
 SHARE_USER="user"
@@ -69,11 +76,42 @@ setup_debug_logging() {
 	echo "Debug log: $DEBUG_LOG"
 }
 
+detect_target_configuration() {
+	case "$LIVE_DISTRO_ID" in
+		debian)
+			TARGET_DISTRO="debian"
+			TARGET_RELEASE="$DEBIAN_RELEASE"
+			ID="$TARGET_DISTRO"
+			ZPOOL_COMPATIBILITY="openzfs-2.2-linux"
+			TARGET_ADMIN_GROUP="sudo"
+			;;
+		fedora)
+			if [[ -z "$LIVE_DISTRO_VERSION" ]]; then
+				echo "Unable to determine the Fedora release from /etc/os-release"
+				return 1
+			fi
+			FEDORA_RELEASE="$LIVE_DISTRO_VERSION"
+			TARGET_DISTRO="fedora"
+			TARGET_RELEASE="$FEDORA_RELEASE"
+			ID="$TARGET_DISTRO"
+			ZPOOL_COMPATIBILITY="openzfs-2.3-linux"
+			TARGET_ADMIN_GROUP="wheel"
+			;;
+		*)
+			echo "Unsupported live distribution: $LIVE_DISTRO_ID"
+			echo "Supported live environments: Debian live -> Debian target, Fedora Workstation live -> Fedora target"
+			return 1
+			;;
+	esac
+}
+
 log_environment_snapshot() {
 	echo "=== ZFSBootMenu installer debug context ==="
 	echo "Start time: $(date -Iseconds 2>/dev/null || date)"
-	echo "Target Debian release: $DEBIAN_RELEASE"
-	echo "Live OS ID: $ID"
+	echo "Live OS ID: $LIVE_DISTRO_ID"
+	echo "Live OS release: ${LIVE_DISTRO_VERSION:-unknown}"
+	echo "Target OS ID: $TARGET_DISTRO"
+	echo "Target OS release: $TARGET_RELEASE"
 	echo "Live kernel: $KERNEL_VERSION"
 	echo "Running as: $(id -un)"
 	echo "Working directory: $(pwd)"
@@ -87,6 +125,8 @@ log_selected_configuration() {
 	echo "Selected pool disk: $POOL_DISK"
 	echo "Boot device: $BOOT_DEVICE"
 	echo "Pool device: $POOL_DEVICE"
+	echo "Target distro: $TARGET_DISTRO"
+	echo "Target release: $TARGET_RELEASE"
 	echo "Pool name: $POOL_NAME"
 	echo "Mount point: $MOUNT_POINT"
 	echo "Hostname: $HOSTNAME"
@@ -272,6 +312,55 @@ apt_get_safe() {
 	apt-get "$@"
 }
 
+install_log_sharing_packages() {
+	local distro="${TARGET_DISTRO:-$LIVE_DISTRO_ID}"
+
+	case "$distro" in
+		debian)
+			quiesce_apt_background_tasks
+			apt_get_safe update
+			apt_get_safe install -y samba
+			;;
+		fedora)
+			dnf install -y samba
+			;;
+		*)
+			echo "Unable to install Samba automatically for unsupported distro: $distro"
+			return 1
+			;;
+	esac
+}
+
+dnf_install_live() {
+	dnf -y --releasever="$FEDORA_RELEASE" "$@"
+}
+
+dnf_install_live_release_only() {
+	dnf -y --releasever="$FEDORA_RELEASE" --disablerepo=updates "$@"
+}
+
+dnf_install_target() {
+	dnf -y --installroot "$MOUNT_POINT" --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False "$@"
+}
+
+dnf_install_target_release_only() {
+	dnf -y --installroot "$MOUNT_POINT" --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates "$@"
+}
+
+fedora_zfs_release_rpm() {
+	printf '%s\n' "https://zfsonlinux.org/fedora/zfs-release-3-0$(rpm --eval '%{dist}').noarch.rpm"
+}
+
+fedora_kernel_devel_url() {
+	printf '%s\n' "https://dl.fedoraproject.org/pub/fedora/linux/releases/${FEDORA_RELEASE}/Everything/x86_64/os/Packages/k/kernel-devel-${KERNEL_VERSION}.rpm"
+}
+
+remove_zfs_fuse_if_present() {
+	if command -v rpm >/dev/null 2>&1 && rpm -q zfs-fuse >/dev/null 2>&1; then
+		rpm -e --nodeps zfs-fuse
+	fi
+}
+
 get_local_ipv4_addresses() {
 	hostname -I 2>/dev/null | awk '{
 		for (i = 1; i <= NF; i++) {
@@ -364,9 +453,7 @@ publish_debug_log_over_smb() {
 	if ! command -v smbd >/dev/null 2>&1 || ! command -v smbpasswd >/dev/null 2>&1; then
 		echo "Installing Samba packages for log sharing..."
 		set +e
-		quiesce_apt_background_tasks
-		apt_get_safe update
-		apt_get_safe install -y samba
+		install_log_sharing_packages
 		install_rc=$?
 		set -e
 		if [[ $install_rc -ne 0 ]]; then
@@ -594,8 +681,8 @@ generate_hostid() {
 }
 
 configure_apt_sources() {
-  echo "Configuring APT sources..."
-  cat > /etc/apt/sources.list <<EOF
+	echo "Configuring APT sources..."
+	cat > /etc/apt/sources.list <<EOF
 deb http://deb.debian.org/debian ${DEBIAN_RELEASE} main contrib non-free-firmware
 deb-src http://deb.debian.org/debian ${DEBIAN_RELEASE} main contrib non-free-firmware
 
@@ -607,8 +694,23 @@ deb-src http://deb.debian.org/debian ${DEBIAN_RELEASE}-updates main contrib non-
 EOF
 }
 
-install_host_packages() {
-  echo "Installing necessary packages"
+configure_package_sources() {
+	case "$TARGET_DISTRO" in
+		debian)
+			configure_apt_sources
+			;;
+		fedora)
+			echo "Using Fedora package repositories from the live environment."
+			;;
+		*)
+			echo "Unsupported target distro for package source configuration: $TARGET_DISTRO"
+			return 1
+			;;
+	esac
+}
+
+install_host_packages_debian() {
+	echo "Installing necessary packages"
 	quiesce_apt_background_tasks
 	apt_get_safe update
 	apt_get_safe install -y debootstrap gdisk dkms curl
@@ -617,6 +719,35 @@ install_host_packages() {
 	echo "Loading ZFS module for the live environment"
 	modprobe zfs
 	prepare_host_efi_support
+}
+
+install_host_packages_fedora() {
+	echo "Installing necessary packages"
+	dnf_install_live install gdisk dkms curl wget dosfstools efibootmgr rsync
+	remove_zfs_fuse_if_present
+	if ! rpm -q zfs-release >/dev/null 2>&1; then
+		dnf_install_live_release_only install "$(fedora_zfs_release_rpm)"
+	fi
+	dnf_install_live_release_only install "$(fedora_kernel_devel_url)"
+	dnf_install_live_release_only install zfs
+	echo "Loading ZFS module for the live environment"
+	modprobe zfs
+	prepare_host_efi_support
+}
+
+install_host_packages() {
+	case "$TARGET_DISTRO" in
+		debian)
+			install_host_packages_debian
+			;;
+		fedora)
+			install_host_packages_fedora
+			;;
+		*)
+			echo "Unsupported target distro for host package installation: $TARGET_DISTRO"
+			return 1
+			;;
+	esac
 }
 
 partition_disk() {
@@ -643,7 +774,7 @@ create_zpool() {
 	local dataset_path=""
 
   echo "Creating ZFS pool and datasets..."
-	zpool create -f -o ashift=12 -O compression=lz4 -O acltype=posixacl -O xattr=sa -O relatime=on -o autotrim=on -o compatibility=openzfs-2.2-linux -m none "$POOL_NAME" "$POOL_DEVICE"
+	zpool create -f -o ashift=12 -O compression=lz4 -O acltype=posixacl -O xattr=sa -O relatime=on -o autotrim=on -o compatibility="$ZPOOL_COMPATIBILITY" -m none "$POOL_NAME" "$POOL_DEVICE"
 	zfs create -u -o mountpoint=none "$POOL_NAME/ROOT"
 	zfs create -u -o mountpoint=/ -o canmount=noauto "$root_dataset"
 	for dataset_path in "${be_local_datasets[@]}"; do
@@ -675,11 +806,72 @@ export_import_zpool() {
 	udevadm trigger
 }
 
-setup_base_system() {
-  echo "Installing base system with debootstrap..."
+setup_base_system_debian() {
+	echo "Installing base system with debootstrap..."
 	debootstrap "$DEBIAN_RELEASE" "$MOUNT_POINT"
 	cp /etc/hostid "$MOUNT_POINT/etc/hostid"
 	cp /etc/resolv.conf "$MOUNT_POINT/etc/resolv.conf"
+}
+
+setup_base_system_fedora() {
+	local base_packages=(
+		@core
+		dnf
+		fedora-release
+		fedora-repos
+		passwd
+		sudo
+		systemd-networkd
+		systemd-resolved
+		openssh-server
+		dosfstools
+		efibootmgr
+		curl
+		wget
+		net-tools
+		iproute
+		dhcp-client
+		iputils
+		traceroute
+		bind-utils
+		ethtool
+		tcpdump
+		nmap
+		nano
+		vim-enhanced
+		htop
+		git
+		tmux
+		rsync
+		kernel
+		dracut
+		dkms
+		glibc-langpack-en
+	)
+
+	echo "Installing base system with dnf installroot..."
+	mkdir -p "$MOUNT_POINT"
+	dnf_install_target_release_only install "${base_packages[@]}"
+	dnf_install_target_release_only install "$(fedora_zfs_release_rpm)"
+	dnf_install_target_release_only install "$(fedora_kernel_devel_url)"
+	dnf_install_target_release_only install zfs zfs-dracut
+	cp /etc/hostid "$MOUNT_POINT/etc/hostid"
+	cp -L /etc/resolv.conf "$MOUNT_POINT/etc/resolv.conf"
+}
+
+setup_base_system() {
+	case "$TARGET_DISTRO" in
+		debian)
+			setup_base_system_debian
+			;;
+		fedora)
+			setup_base_system_fedora
+			;;
+		*)
+			echo "Unsupported target distro for base system installation: $TARGET_DISTRO"
+			return 1
+			;;
+	esac
 }
 
 prepare_chroot() {
@@ -690,7 +882,7 @@ prepare_chroot() {
   mount -t devpts pts $MOUNT_POINT/dev/pts
 }
 
-enter_chroot() {
+enter_chroot_debian() {
 	local networkd_config=""
 	local networkd_mode_line=""
 	local dns_server=""
@@ -713,7 +905,7 @@ enter_chroot() {
 		networkd_config+="IPv6AcceptRA=yes"$'\n'
 	fi
 
-	echo "Entering chroot environment to configure system..."
+	echo "Entering chroot environment to configure Debian system..."
 	chroot $MOUNT_POINT /bin/bash <<-EOF
 	set -Eeo pipefail
 
@@ -828,7 +1020,7 @@ $networkd_config
  	mkdir -p /boot/efi/EFI/BOOT
 	curl -o /boot/efi/EFI/ZBM/VMLINUZ.EFI -L https://get.zfsbootmenu.org/efi
 	cp /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI
-	cp /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/BOOT/bootx64.efi  # Default path if needed
+	cp /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/BOOT/bootx64.efi
 	
 	# Mount EFI variables if needed
 	echo "Mounting efivarfs for boot entry setup..."
@@ -851,6 +1043,179 @@ $networkd_config
 	EOF
 }
 
+enter_chroot_fedora() {
+	local networkd_config=""
+	local networkd_mode_line=""
+	local dns_server=""
+	local install_network_configuration="0"
+
+	if [[ ( "$NETWORK_MODE" == "dhcp" || "$NETWORK_MODE" == "static" ) && -n "$NETWORK_INTERFACE_MAC" ]]; then
+		install_network_configuration="1"
+		networkd_config=$'# Generated by setup-zfsbootmenu.sh\n[Match]\n'
+		networkd_config+="MACAddress=$NETWORK_INTERFACE_MAC"$'\n\n[Network]\n'
+		if [[ "$NETWORK_MODE" == "dhcp" ]]; then
+			networkd_mode_line="DHCP=ipv4"
+			networkd_config+="$networkd_mode_line"$'\n'
+		else
+			networkd_config+="Address=$NETWORK_IPV4_CIDR"$'\n'
+			networkd_config+="Gateway=$NETWORK_GATEWAY"$'\n'
+			for dns_server in $NETWORK_DNS_SERVERS; do
+				networkd_config+="DNS=$dns_server"$'\n'
+			done
+		fi
+		networkd_config+="IPv6AcceptRA=yes"$'\n'
+	fi
+
+	echo "Entering chroot environment to configure Fedora system..."
+	chroot $MOUNT_POINT /bin/bash <<-EOF
+	set -Eeo pipefail
+
+	chroot_log_error() {
+		local line_no="\$1"
+		local exit_code="\$2"
+		echo "[chroot] ERROR: command failed at line \${line_no} with exit code \${exit_code}"
+	}
+
+	trap 'chroot_log_error \$LINENO \$?' ERR
+
+	# Set hostname
+	echo "$HOSTNAME" > /etc/hostname
+	echo "127.0.1.1    $HOSTNAME" >> /etc/hosts
+
+	# Configure locale
+	echo "Configuring locale..."
+	echo 'LANG=en_US.UTF-8' > /etc/locale.conf
+
+	# Set root password
+	echo "Setting root password..."
+	echo "root:$ROOT_PASSWORD" | chpasswd
+
+	# Create user and set password
+	echo "Creating user and setting permissions..."
+	fedora_groups="$TARGET_ADMIN_GROUP"
+	for candidate_group in audio cdrom dialout netdev plugdev video; do
+		if getent group "\$candidate_group" >/dev/null 2>&1; then
+			fedora_groups+=",\$candidate_group"
+		fi
+	done
+	useradd -m -s /bin/bash -G "\$fedora_groups" $USERNAME
+	echo "$USERNAME:$USER_PASSWORD" | chpasswd
+
+	# Configure first-boot networking
+	if [[ "$install_network_configuration" == "1" ]]; then
+		echo "Configuring first-boot networking..."
+		mkdir -p /etc/systemd/network
+		cat > /etc/systemd/network/20-installer-primary.network <<-'EOF_NETWORKD'
+$networkd_config
+		EOF_NETWORKD
+		systemctl enable systemd-networkd >/dev/null 2>&1 || systemctl enable systemd-networkd
+		if [[ -f /usr/lib/systemd/system/systemd-resolved.service || -f /lib/systemd/system/systemd-resolved.service ]]; then
+			systemctl enable systemd-resolved >/dev/null 2>&1 || systemctl enable systemd-resolved
+		else
+			echo "systemd-resolved service is unavailable; leaving /etc/resolv.conf unchanged."
+		fi
+		systemctl disable systemd-networkd-wait-online.service systemd-networkd-wait-online@.service >/dev/null 2>&1 || true
+	else
+		echo "Skipping automatic first-boot wired network configuration."
+	fi
+
+	# Enable core headless services
+	echo "Enabling core services..."
+	if [[ -f /usr/lib/systemd/system/sshd.service || -f /lib/systemd/system/sshd.service ]]; then
+		systemctl enable sshd >/dev/null 2>&1 || systemctl enable sshd
+	fi
+	if [[ -f /usr/lib/systemd/system/systemd-timesyncd.service || -f /lib/systemd/system/systemd-timesyncd.service ]]; then
+		systemctl enable systemd-timesyncd >/dev/null 2>&1 || systemctl enable systemd-timesyncd
+	fi
+
+	# Configure Dracut for ZFS root imports
+	echo "Configuring Dracut for ZFS..."
+	mkdir -p /etc/dracut.conf.d
+	cat > /etc/dracut.conf.d/zol.conf <<-'EOF_DRACUT'
+	nofsck="yes"
+	add_dracutmodules+=" zfs "
+	omit_dracutmodules+=" btrfs "
+	EOF_DRACUT
+
+	# Enable systemd ZFS services
+	echo "Enabling systemd ZFS services..."
+	systemctl enable zfs.target
+	systemctl enable zfs-import-cache
+	systemctl enable zfs-mount
+	systemctl enable zfs-import.target
+
+	# Rebuild initramfs
+	echo "Rebuilding initramfs..."
+	dracut --force --regenerate-all
+
+	# Set ZFSBootMenu command-line arguments for inherited ZFS properties
+	echo "Configuring ZFSBootMenu command-line arguments..."
+	zfs set org.zfsbootmenu:commandline="quiet" $POOL_NAME/ROOT
+
+	# Set up EFI filesystem
+	echo "Setting up EFI filesystem..."
+	mkfs.vfat -F32 "$BOOT_DEVICE"
+	boot_uuid=\$(blkid -s UUID -o value "$BOOT_DEVICE")
+	if [[ -z "\$boot_uuid" ]]; then
+		echo "Unable to determine the EFI partition UUID for $BOOT_DEVICE"
+		exit 1
+	fi
+
+	# Configure fstab entry for EFI
+	echo "Configuring fstab for EFI partition..."
+	printf 'UUID=%s /boot/efi vfat defaults 0 0\n' "\$boot_uuid" >> /etc/fstab
+
+	# Mount EFI partition
+	mkdir -p /boot/efi
+	mount "$BOOT_DEVICE" /boot/efi
+
+	# Install ZFSBootMenu
+	echo "Installing ZFSBootMenu..."
+	mkdir -p /boot/efi/EFI/ZBM
+	mkdir -p /boot/efi/EFI/BOOT
+	curl -o /boot/efi/EFI/ZBM/VMLINUZ.EFI -L https://get.zfsbootmenu.org/efi
+	cp /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI
+	cp /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/BOOT/bootx64.efi
+
+	# Mount EFI variables if needed
+	echo "Mounting efivarfs for boot entry setup..."
+	mount -t efivarfs efivarfs /sys/firmware/efi/efivars
+
+	# Install and configure EFI boot manager
+	echo "Configuring EFI boot entries..."
+	efibootmgr -c -d "$BOOT_DISK" -p "$BOOT_PART" -L "ZFSBootMenu (Backup)" -l '\EFI\ZBM\VMLINUZ-BACKUP.EFI'
+	efibootmgr -c -d "$BOOT_DISK" -p "$BOOT_PART" -L "ZFSBootMenu" -l '\EFI\ZBM\VMLINUZ.EFI'
+	efibootmgr -c -d "$BOOT_DISK" -p "$BOOT_PART" -L "ZFSBootMenu" -l '\EFI\BOOT\bootx64.efi'
+
+	# Hand off DNS management to the installed system after all network-dependent setup is done.
+	if [[ "$install_network_configuration" == "1" ]]; then
+		if [[ -f /usr/lib/systemd/system/systemd-resolved.service || -f /lib/systemd/system/systemd-resolved.service ]]; then
+			rm -f /etc/resolv.conf
+			ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+		fi
+	fi
+
+	# Ensure custom files written in the chroot get correct SELinux labels on first boot.
+	echo "Scheduling SELinux relabel on first boot..."
+	touch /.autorelabel
+	EOF
+}
+
+enter_chroot() {
+	case "$TARGET_DISTRO" in
+		debian)
+			enter_chroot_debian
+			;;
+		fedora)
+			enter_chroot_fedora
+			;;
+		*)
+			echo "Unsupported target distro for chroot configuration: $TARGET_DISTRO"
+			return 1
+			;;
+	esac
+}
+
 cleanup_chroot() {
   echo "Cleaning up chroot environment..."
   umount -l $MOUNT_POINT/dev/pts
@@ -869,13 +1234,14 @@ final_cleanup() {
 # Execution sequence
 setup_debug_logging
 echo "Starting ZFS Boot Menu installation..."
+detect_target_configuration
 refresh_device_vars
 log_environment_snapshot
 select_disk
 get_username_and_password
 get_network_configuration
 log_selected_configuration
-configure_apt_sources
+configure_package_sources
 install_host_packages
 generate_hostid
 partition_disk
