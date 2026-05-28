@@ -918,16 +918,20 @@ setup_base_system_debian() {
 
 setup_base_system_fedora() {
 	local install_tree=""
+	local rsync_info="stats2"
 
 	echo "Installing base system from the Fedora live image..."
 	mkdir -p "$MOUNT_POINT"
 	install_tree=$(prepare_fedora_live_install_tree)
+	if [[ -t 1 ]]; then
+		rsync_info="progress2"
+	fi
 	echo "Copying Fedora live system from $install_tree to $MOUNT_POINT..."
 	rsync -pogAXtlHrDx \
 		--stats \
 		--exclude=/boot/efi/* \
 		--exclude=/etc/machine-id \
-		--info=progress2 \
+		--info="$rsync_info" \
 		"$install_tree/" "$MOUNT_POINT"
 	mkdir -p "$MOUNT_POINT/etc"
 	if [[ -e "$MOUNT_POINT/etc/resolv.conf" ]]; then
@@ -1133,6 +1137,8 @@ enter_chroot_fedora() {
 	local install_network_configuration="0"
 	local zfs_release_url=""
 	local kernel_devel_url=""
+	local root_password_hash=""
+	local user_password_hash=""
 
 	if [[ ( "$NETWORK_MODE" == "dhcp" || "$NETWORK_MODE" == "static" ) && -n "$NETWORK_INTERFACE_MAC" ]]; then
 		install_network_configuration="1"
@@ -1153,6 +1159,12 @@ enter_chroot_fedora() {
 
 	zfs_release_url=$(resolve_fedora_zfs_release_rpm)
 	kernel_devel_url=$(fedora_kernel_devel_url)
+	if ! command -v openssl >/dev/null 2>&1; then
+		echo "openssl is required to configure Fedora target passwords"
+		return 1
+	fi
+	root_password_hash=$(printf '%s' "$ROOT_PASSWORD" | openssl passwd -6 -stdin)
+	user_password_hash=$(printf '%s' "$USER_PASSWORD" | openssl passwd -6 -stdin)
 	echo "Resolved Fedora target zfs-release RPM for chroot: $zfs_release_url"
 	echo "Resolved Fedora target kernel-devel RPM for chroot: $kernel_devel_url"
 
@@ -1202,7 +1214,7 @@ enter_chroot_fedora() {
 	# Set root password
 	clear_account_locks
 	echo "Setting root password..."
-	echo "root:$ROOT_PASSWORD" | chpasswd
+	usermod --password '$root_password_hash' root
 
 	# Create user and set password
 	clear_account_locks
@@ -1213,9 +1225,7 @@ enter_chroot_fedora() {
 			fedora_groups+=",\$candidate_group"
 		fi
 	done
-	useradd -m -s /bin/bash -G "\$fedora_groups" $USERNAME
-	clear_account_locks
-	echo "$USERNAME:$USER_PASSWORD" | chpasswd
+	useradd -m -s /bin/bash -G "\$fedora_groups" -p '$user_password_hash' $USERNAME
 
 	# Configure first-boot networking
 	if [[ "$install_network_configuration" == "1" ]]; then
