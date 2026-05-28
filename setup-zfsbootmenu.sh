@@ -1190,6 +1190,19 @@ enter_chroot_fedora() {
 		done
 	}
 
+	remove_installed_packages() {
+		local package=""
+		local installed_packages=()
+		for package in "\$@"; do
+			if rpm -q "\$package" >/dev/null 2>&1; then
+				installed_packages+=("\$package")
+			fi
+		done
+		if [[ "\${#installed_packages[@]}" -gt 0 ]]; then
+			dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --setopt=clean_requirements_on_remove=True --disablerepo=updates remove "\${installed_packages[@]}"
+		fi
+	}
+
 	# Set hostname
 	echo "$HOSTNAME" > /etc/hostname
 	echo "127.0.1.1    $HOSTNAME" >> /etc/hosts
@@ -1206,6 +1219,23 @@ enter_chroot_fedora() {
 		dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install "$kernel_devel_url"
 	fi
 	dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install zfs zfs-dracut
+
+	# The Fedora Workstation live image is copied into the target, so remove its desktop stack.
+	echo "Removing Fedora desktop packages from target install..."
+	remove_installed_packages \
+		gdm \
+		gnome-shell \
+		gnome-session-wayland-session \
+		gnome-session-xsession \
+		gnome-classic-session \
+		gnome-control-center \
+		gnome-software \
+		gnome-tour \
+		nautilus \
+		ptyxis \
+		gnome-terminal \
+		xdg-desktop-portal-gnome \
+		xdg-desktop-portal-gtk
 
 	# Configure locale
 	echo "Configuring locale..."
