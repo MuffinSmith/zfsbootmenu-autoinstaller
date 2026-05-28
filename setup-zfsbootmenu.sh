@@ -1156,6 +1156,16 @@ enter_chroot_fedora() {
 
 	trap 'chroot_log_error \$LINENO \$?' ERR
 
+	clear_account_locks() {
+		local lock_file=""
+		for lock_file in /etc/.pwd.lock /etc/passwd.lock /etc/group.lock /etc/gshadow.lock /etc/shadow.lock; do
+			if [[ -e "\$lock_file" ]]; then
+				echo "Removing stale account lock: \$lock_file"
+				rm -f "\$lock_file"
+			fi
+		done
+	}
+
 	# Set hostname
 	echo "$HOSTNAME" > /etc/hostname
 	echo "127.0.1.1    $HOSTNAME" >> /etc/hosts
@@ -1165,10 +1175,12 @@ enter_chroot_fedora() {
 	echo 'LANG=en_US.UTF-8' > /etc/locale.conf
 
 	# Set root password
+	clear_account_locks
 	echo "Setting root password..."
 	echo "root:$ROOT_PASSWORD" | chpasswd
 
 	# Create user and set password
+	clear_account_locks
 	echo "Creating user and setting permissions..."
 	fedora_groups="$TARGET_ADMIN_GROUP"
 	for candidate_group in audio cdrom dialout netdev plugdev video; do
@@ -1177,6 +1189,7 @@ enter_chroot_fedora() {
 		fi
 	done
 	useradd -m -s /bin/bash -G "\$fedora_groups" $USERNAME
+	clear_account_locks
 	echo "$USERNAME:$USER_PASSWORD" | chpasswd
 
 	# Configure first-boot networking
