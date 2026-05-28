@@ -916,6 +916,7 @@ setup_base_system_fedora() {
 
 	echo "Installing base system with dnf installroot..."
 	mkdir -p "$MOUNT_POINT"
+	prepare_runtime_mounts
 	zfs_release_url=$(resolve_fedora_zfs_release_rpm)
 	echo "Resolved Fedora target zfs-release RPM: $zfs_release_url"
 	dnf_install_target_release_only install "${base_packages[@]}"
@@ -941,12 +942,18 @@ setup_base_system() {
 	esac
 }
 
+prepare_runtime_mounts() {
+	mkdir -p "$MOUNT_POINT/proc" "$MOUNT_POINT/sys" "$MOUNT_POINT/dev/pts" "$MOUNT_POINT/run"
+	mountpoint -q "$MOUNT_POINT/proc" || mount -t proc proc "$MOUNT_POINT/proc"
+	mountpoint -q "$MOUNT_POINT/sys" || mount -t sysfs sysfs "$MOUNT_POINT/sys"
+	mountpoint -q "$MOUNT_POINT/dev" || mount -B /dev "$MOUNT_POINT/dev"
+	mountpoint -q "$MOUNT_POINT/dev/pts" || mount -t devpts devpts "$MOUNT_POINT/dev/pts"
+	mountpoint -q "$MOUNT_POINT/run" || mount -B /run "$MOUNT_POINT/run"
+}
+
 prepare_chroot() {
   echo "Mounting filesystems for chroot environment..."
-  mount -t proc proc $MOUNT_POINT/proc
-  mount -t sysfs sys $MOUNT_POINT/sys
-  mount -B /dev $MOUNT_POINT/dev
-  mount -t devpts pts $MOUNT_POINT/dev/pts
+  prepare_runtime_mounts
 }
 
 enter_chroot_debian() {
@@ -1285,10 +1292,11 @@ enter_chroot() {
 
 cleanup_chroot() {
   echo "Cleaning up chroot environment..."
-  umount -l $MOUNT_POINT/dev/pts
-  umount -l $MOUNT_POINT/dev
-  umount -l $MOUNT_POINT/sys
-  umount -l $MOUNT_POINT/proc
+	umount -l "$MOUNT_POINT/run" 2>/dev/null || true
+	umount -l "$MOUNT_POINT/dev/pts" 2>/dev/null || true
+	umount -l "$MOUNT_POINT/dev" 2>/dev/null || true
+	umount -l "$MOUNT_POINT/sys" 2>/dev/null || true
+	umount -l "$MOUNT_POINT/proc" 2>/dev/null || true
 }
 
 final_cleanup() {
