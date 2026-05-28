@@ -919,7 +919,7 @@ setup_base_system_fedora() {
 	prepare_runtime_mounts
 	zfs_release_url=$(resolve_fedora_zfs_release_rpm)
 	echo "Resolved Fedora target zfs-release RPM: $zfs_release_url"
-	dnf_install_target_release_only install "${base_packages[@]}"
+	dnf_install_target_release_only --exclude=dracut-config-rescue install "${base_packages[@]}"
 	dnf_install_target_release_only install "$zfs_release_url"
 	dnf_install_target_release_only install "$(fedora_kernel_devel_url)"
 	dnf_install_target_release_only install zfs zfs-dracut
