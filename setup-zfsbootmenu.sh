@@ -924,7 +924,11 @@ setup_base_system_fedora() {
 	dnf_install_target_release_only install "$(fedora_kernel_devel_url)"
 	dnf_install_target_release_only install zfs zfs-dracut
 	cp /etc/hostid "$MOUNT_POINT/etc/hostid"
-	cp -L /etc/resolv.conf "$MOUNT_POINT/etc/resolv.conf"
+	if [[ -e "$MOUNT_POINT/etc/resolv.conf" ]] && [[ /etc/resolv.conf -ef "$MOUNT_POINT/etc/resolv.conf" ]]; then
+		echo "Target resolv.conf already points at the live resolver; leaving it in place."
+	else
+		cp -L /etc/resolv.conf "$MOUNT_POINT/etc/resolv.conf"
+	fi
 }
 
 setup_base_system() {
