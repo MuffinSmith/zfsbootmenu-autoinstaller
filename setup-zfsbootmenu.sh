@@ -333,19 +333,23 @@ install_log_sharing_packages() {
 }
 
 dnf_install_live() {
+	echo "Running Fedora live package command: dnf -y --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False $*"
 	dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False "$@"
 }
 
 dnf_install_live_release_only() {
+	echo "Running Fedora live release-only command: dnf -y --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False --disablerepo=updates $*"
 	dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates "$@"
 }
 
 dnf_install_target() {
-	dnf -y --installroot "$MOUNT_POINT" --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False "$@"
+	echo "Running Fedora installroot command: dnf -y --installroot $MOUNT_POINT --use-host-config --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False $*"
+	dnf -y --installroot "$MOUNT_POINT" --use-host-config --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False "$@"
 }
 
 dnf_install_target_release_only() {
-	dnf -y --installroot "$MOUNT_POINT" --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates "$@"
+	echo "Running Fedora installroot release-only command: dnf -y --installroot $MOUNT_POINT --use-host-config --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False --disablerepo=updates $*"
+	dnf -y --installroot "$MOUNT_POINT" --use-host-config --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates "$@"
 }
 
 url_exists() {
@@ -378,8 +382,10 @@ resolve_fedora_zfs_release_rpm() {
 	fi
 
 	while IFS= read -r candidate; do
+		echo "Checking Fedora zfs-release candidate: $candidate"
 		if [[ -n "$candidate" ]] && url_exists "$candidate"; then
 			FEDORA_ZFS_RELEASE_URL="$candidate"
+			echo "Using Fedora zfs-release RPM: $FEDORA_ZFS_RELEASE_URL"
 			printf '%s\n' "$FEDORA_ZFS_RELEASE_URL"
 			return 0
 		fi
@@ -783,6 +789,7 @@ install_host_packages_fedora() {
 
 	echo "Installing necessary packages"
 	zfs_release_url=$(resolve_fedora_zfs_release_rpm)
+	echo "Resolved Fedora live zfs-release RPM: $zfs_release_url"
 	dnf_install_live install gdisk curl wget dosfstools efibootmgr rsync
 	remove_zfs_fuse_if_present
 	if ! rpm -q zfs-release >/dev/null 2>&1; then
@@ -909,6 +916,7 @@ setup_base_system_fedora() {
 	echo "Installing base system with dnf installroot..."
 	mkdir -p "$MOUNT_POINT"
 	zfs_release_url=$(resolve_fedora_zfs_release_rpm)
+	echo "Resolved Fedora target zfs-release RPM: $zfs_release_url"
 	dnf_install_target_release_only install "${base_packages[@]}"
 	dnf_install_target_release_only install "$zfs_release_url"
 	dnf_install_target_release_only install "$(fedora_kernel_devel_url)"
