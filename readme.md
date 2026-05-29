@@ -44,8 +44,10 @@ This script automates the installation and configuration of a headless ZFSBootMe
    Fedora Server installer shell:
 
    ```bash
+   PKG_MANAGER="$(command -v dnf || command -v dnf5 || command -v microdnf)"
+   [ -n "$PKG_MANAGER" ] || { echo "No Fedora package manager found"; exit 1; }
    timedatectl set-ntp true || true
-   dnf install -y curl
+   command -v curl >/dev/null 2>&1 || "$PKG_MANAGER" install -y curl
    curl -fsSLo setup-zfsbootmenu.sh https://raw.githubusercontent.com/MuffinSmith/zfsbootmenu-autoinstaller/feature/fedora-support/setup-zfsbootmenu.sh
    chmod +x setup-zfsbootmenu.sh
    ./setup-zfsbootmenu.sh

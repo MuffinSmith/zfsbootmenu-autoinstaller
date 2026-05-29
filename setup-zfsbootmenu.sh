@@ -22,6 +22,7 @@ ID="$LIVE_DISTRO_ID"
 ZPOOL_COMPATIBILITY="openzfs-2.2-linux"
 TARGET_ADMIN_GROUP="sudo"
 FEDORA_ZFS_RELEASE_URL=""
+FEDORA_PKG_MANAGER=""
 DEBUG_LOG=""
 SHARE_NAME="zfsbootmenu"
 SHARE_USER="user"
@@ -313,8 +314,29 @@ apt_get_safe() {
 	apt-get "$@"
 }
 
+resolve_fedora_package_manager() {
+	local candidate=""
+
+	if [[ -n "$FEDORA_PKG_MANAGER" ]] && command -v "$FEDORA_PKG_MANAGER" >/dev/null 2>&1; then
+		printf '%s\n' "$FEDORA_PKG_MANAGER"
+		return 0
+	fi
+
+	for candidate in dnf dnf5 microdnf; do
+		if command -v "$candidate" >/dev/null 2>&1; then
+			FEDORA_PKG_MANAGER="$candidate"
+			printf '%s\n' "$FEDORA_PKG_MANAGER"
+			return 0
+		fi
+	done
+
+	echo "Unable to find a Fedora package manager (dnf, dnf5, or microdnf)" >&2
+	return 1
+}
+
 install_log_sharing_packages() {
 	local distro="${TARGET_DISTRO:-$LIVE_DISTRO_ID}"
+	local fedora_pkg_manager=""
 
 	case "$distro" in
 		debian)
@@ -323,7 +345,8 @@ install_log_sharing_packages() {
 			apt_get_safe install -y samba
 			;;
 		fedora)
-			dnf install -y samba
+			fedora_pkg_manager=$(resolve_fedora_package_manager)
+			"$fedora_pkg_manager" install -y samba
 			;;
 		*)
 			echo "Unable to install Samba automatically for unsupported distro: $distro"
@@ -333,23 +356,31 @@ install_log_sharing_packages() {
 }
 
 dnf_install_live() {
-	echo "Running Fedora live package command: dnf -y --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False $*"
-	dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False "$@"
+	local fedora_pkg_manager=""
+	fedora_pkg_manager=$(resolve_fedora_package_manager)
+	echo "Running Fedora live package command: $fedora_pkg_manager -y --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False $*"
+	"$fedora_pkg_manager" -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False "$@"
 }
 
 dnf_install_live_release_only() {
-	echo "Running Fedora live release-only command: dnf -y --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False --disablerepo=updates $*"
-	dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates "$@"
+	local fedora_pkg_manager=""
+	fedora_pkg_manager=$(resolve_fedora_package_manager)
+	echo "Running Fedora live release-only command: $fedora_pkg_manager -y --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False --disablerepo=updates $*"
+	"$fedora_pkg_manager" -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates "$@"
 }
 
 dnf_install_target() {
-	echo "Running Fedora installroot command: dnf -y --installroot $MOUNT_POINT --use-host-config --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False $*"
-	dnf -y --installroot "$MOUNT_POINT" --use-host-config --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False "$@"
+	local fedora_pkg_manager=""
+	fedora_pkg_manager=$(resolve_fedora_package_manager)
+	echo "Running Fedora installroot command: $fedora_pkg_manager -y --installroot $MOUNT_POINT --use-host-config --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False $*"
+	"$fedora_pkg_manager" -y --installroot "$MOUNT_POINT" --use-host-config --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False "$@"
 }
 
 dnf_install_target_release_only() {
-	echo "Running Fedora installroot release-only command: dnf -y --installroot $MOUNT_POINT --use-host-config --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False --disablerepo=updates $*"
-	dnf -y --installroot "$MOUNT_POINT" --use-host-config --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates "$@"
+	local fedora_pkg_manager=""
+	fedora_pkg_manager=$(resolve_fedora_package_manager)
+	echo "Running Fedora installroot release-only command: $fedora_pkg_manager -y --installroot $MOUNT_POINT --use-host-config --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False --disablerepo=updates $*"
+	"$fedora_pkg_manager" -y --installroot "$MOUNT_POINT" --use-host-config --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates "$@"
 }
 
 url_exists() {
@@ -1151,6 +1182,25 @@ enter_chroot_fedora() {
 
 	trap 'chroot_log_error \$LINENO \$?' ERR
 
+	resolve_chroot_fedora_package_manager() {
+		local candidate=""
+		for candidate in dnf dnf5 microdnf; do
+			if command -v "\$candidate" >/dev/null 2>&1; then
+				printf '%s\n' "\$candidate"
+				return 0
+			fi
+		done
+		echo "[chroot] Unable to find a Fedora package manager (dnf, dnf5, or microdnf)"
+		return 1
+	}
+
+	fedora_chroot_install() {
+		"\$FEDORA_CHROOT_PKG_MANAGER" -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install "\$@"
+	}
+
+	FEDORA_CHROOT_PKG_MANAGER=\$(resolve_chroot_fedora_package_manager)
+	echo "Using Fedora chroot package manager: \$FEDORA_CHROOT_PKG_MANAGER"
+
 	clear_account_locks() {
 		local lock_file=""
 		for lock_file in /etc/.pwd.lock /etc/passwd.lock /etc/group.lock /etc/gshadow.lock /etc/shadow.lock; do
@@ -1171,18 +1221,18 @@ enter_chroot_fedora() {
 		rpm -e --nodeps zfs-fuse
 	fi
 	if ! rpm -q zfs-release >/dev/null 2>&1; then
-		dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install "$zfs_release_url"
+		fedora_chroot_install "$zfs_release_url"
 	fi
 	if ! rpm -q kernel-devel >/dev/null 2>&1; then
-		dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install kernel-devel
+		fedora_chroot_install kernel-devel
 	fi
 	if ! rpm -q openssh-server >/dev/null 2>&1; then
-		dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install openssh-server
+		fedora_chroot_install openssh-server
 	fi
 	if ! rpm -q sudo >/dev/null 2>&1; then
-		dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install sudo
+		fedora_chroot_install sudo
 	fi
-	dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install zfs zfs-dracut
+	fedora_chroot_install zfs zfs-dracut
 
 	# Configure locale
 	echo "Configuring locale..."
