@@ -971,6 +971,12 @@ setup_base_system_fedora() {
 	echo "Installing Fedora target packages into $MOUNT_POINT with dnf --installroot..."
 	mkdir -p "$MOUNT_POINT"
 	prepare_runtime_mounts
+	if command -v systemd-machine-id-setup >/dev/null 2>&1; then
+		systemd-machine-id-setup --root="$MOUNT_POINT"
+	elif command -v dbus-uuidgen >/dev/null 2>&1; then
+		mkdir -p "$MOUNT_POINT/etc"
+		dbus-uuidgen --ensure="$MOUNT_POINT/etc/machine-id"
+	fi
 	dnf_install_target_release_only install --exclude=dracut-config-rescue "${target_base_packages[@]}"
 	install_optional_fedora_target_package fedora-release-server
 	swap_optional_fedora_target_identity_package fedora-release-identity-server
@@ -1256,6 +1262,41 @@ enter_chroot_fedora() {
 		done
 	}
 
+	ensure_zbm_boot_artifacts() {
+		local kernel_dir=""
+		local kernel_version=""
+		local kernel_source=""
+		local kernel_target=""
+		local initramfs_target=""
+
+		mkdir -p /boot
+		for kernel_dir in /usr/lib/modules/* /lib/modules/*; do
+			if [[ ! -d "\$kernel_dir" ]]; then
+				continue
+			fi
+			kernel_version=\$(basename "\$kernel_dir")
+			kernel_source=""
+			if [[ -f "\$kernel_dir/vmlinuz" ]]; then
+				kernel_source="\$kernel_dir/vmlinuz"
+			fi
+			kernel_target="/boot/vmlinuz-\$kernel_version"
+			initramfs_target="/boot/initramfs-\$kernel_version.img"
+			if [[ -n "\$kernel_source" && ! -e "\$kernel_target" ]]; then
+				echo "Copying kernel image into /boot for ZFSBootMenu: \$kernel_target"
+				install -m 0644 "\$kernel_source" "\$kernel_target"
+			fi
+			if [[ -e "\$kernel_target" && ! -e "\$initramfs_target" ]]; then
+				echo "Generating initramfs for \$kernel_version"
+				dracut --force "\$initramfs_target" "\$kernel_version"
+			fi
+		done
+
+		if ! find /boot -maxdepth 1 -type f \( -name 'vmlinuz*' -o -name 'vmlinux*' -o -name 'linux*' -o -name 'linuz*' -o -name 'kernel*' \) | grep -q .; then
+			echo "No bootable kernel artifacts were created in /boot for ZFSBootMenu."
+			return 1
+		fi
+	}
+
 	# Set hostname
 	echo "$HOSTNAME" > /etc/hostname
 	echo "127.0.1.1    $HOSTNAME" >> /etc/hosts
@@ -1356,6 +1397,7 @@ $networkd_config
 	# Rebuild initramfs
 	echo "Rebuilding initramfs..."
 	dracut --force --regenerate-all
+	ensure_zbm_boot_artifacts
 
 	# Set ZFSBootMenu command-line arguments for inherited ZFS properties
 	echo "Configuring ZFSBootMenu command-line arguments..."
