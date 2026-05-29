@@ -415,6 +415,15 @@ install_optional_fedora_target_package() {
 	fi
 }
 
+swap_optional_fedora_target_identity_package() {
+	local package_name="$1"
+
+	if dnf_target_package_available "$package_name"; then
+		echo "Switching Fedora target identity package to: $package_name"
+		dnf_install_target_release_only install --allowerasing "$package_name"
+	fi
+}
+
 url_exists() {
 	local url="$1"
 
@@ -963,7 +972,7 @@ setup_base_system_fedora() {
 	prepare_runtime_mounts
 	dnf_install_target_release_only install --exclude=dracut-config-rescue "${target_base_packages[@]}"
 	install_optional_fedora_target_package fedora-release-server
-	install_optional_fedora_target_package fedora-release-identity-server
+	swap_optional_fedora_target_identity_package fedora-release-identity-server
 	mkdir -p "$MOUNT_POINT/etc"
 	if [[ -e "$MOUNT_POINT/etc/resolv.conf" ]]; then
 		if [[ "$MOUNT_POINT/etc/resolv.conf" -ef /etc/resolv.conf ]]; then
