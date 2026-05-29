@@ -963,6 +963,7 @@ setup_base_system_fedora() {
 		curl
 		dosfstools
 		efibootmgr
+		systemd-networkd
 		policycoreutils
 		selinux-policy-targeted
 	)
