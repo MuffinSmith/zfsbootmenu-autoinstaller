@@ -1143,9 +1143,13 @@ $networkd_config
 	echo "Setting up EFI filesystem..."
 	mkfs.vfat -F32 "$BOOT_DEVICE"
 	boot_uuid=\$(blkid -s UUID -o value "$BOOT_DEVICE")
+	boot_partuuid=\$(blkid -s PARTUUID -o value "$BOOT_DEVICE")
 	if [[ -z "\$boot_uuid" ]]; then
 		echo "Unable to determine the EFI partition UUID for $BOOT_DEVICE"
 		exit 1
+	fi
+	if [[ -z "\$boot_partuuid" ]]; then
+		echo "Unable to determine the EFI partition PARTUUID for $BOOT_DEVICE; falling back to label-based EFI boot entry cleanup."
 	fi
 	
 	# Configure fstab entry for EFI
@@ -1167,12 +1171,30 @@ $networkd_config
 	# Mount EFI variables if needed
 	echo "Mounting efivarfs for boot entry setup..."
 	mount -t efivarfs efivarfs /sys/firmware/efi/efivars
+
+	remove_existing_zbm_boot_entries() {
+		local bootnum=""
+		while IFS= read -r bootnum; do
+			[[ -n "\$bootnum" ]] || continue
+			echo "Removing existing EFI boot entry Boot\$bootnum"
+			efibootmgr -b "\$bootnum" -B || true
+		done < <(
+			{
+				if [[ -n "\$boot_partuuid" ]]; then
+					efibootmgr -v | grep -Fi "\$boot_partuuid" | grep -F 'ZFSBootMenu' || true
+				else
+					efibootmgr | grep -F 'ZFSBootMenu' || true
+				fi
+			} | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p' | sort -u
+		)
+	}
 	
 	# Install and configure EFI boot manager
 	echo "Configuring EFI boot entries..."
+	remove_existing_zbm_boot_entries
 	efibootmgr -c -d "$BOOT_DISK" -p "$BOOT_PART" -L "ZFSBootMenu (Backup)" -l '\EFI\ZBM\VMLINUZ-BACKUP.EFI'
 	efibootmgr -c -d "$BOOT_DISK" -p "$BOOT_PART" -L "ZFSBootMenu" -l '\EFI\ZBM\VMLINUZ.EFI'
-	efibootmgr -c -d "$BOOT_DISK" -p "$BOOT_PART" -L "ZFSBootMenu" -l '\EFI\BOOT\bootx64.efi'
+	efibootmgr -c -d "$BOOT_DISK" -p "$BOOT_PART" -L "ZFSBootMenu (Fallback)" -l '\EFI\BOOT\bootx64.efi'
 
 	# Hand off DNS management to the installed system after all network-dependent setup is done.
 	if [[ "$install_network_configuration" == "1" ]]; then
@@ -1407,9 +1429,13 @@ $networkd_config
 	echo "Setting up EFI filesystem..."
 	mkfs.vfat -F32 "$BOOT_DEVICE"
 	boot_uuid=\$(blkid -s UUID -o value "$BOOT_DEVICE")
+	boot_partuuid=\$(blkid -s PARTUUID -o value "$BOOT_DEVICE")
 	if [[ -z "\$boot_uuid" ]]; then
 		echo "Unable to determine the EFI partition UUID for $BOOT_DEVICE"
 		exit 1
+	fi
+	if [[ -z "\$boot_partuuid" ]]; then
+		echo "Unable to determine the EFI partition PARTUUID for $BOOT_DEVICE; falling back to label-based EFI boot entry cleanup."
 	fi
 
 	# Configure fstab entry for EFI
@@ -1432,11 +1458,29 @@ $networkd_config
 	echo "Mounting efivarfs for boot entry setup..."
 	mount -t efivarfs efivarfs /sys/firmware/efi/efivars
 
+	remove_existing_zbm_boot_entries() {
+		local bootnum=""
+		while IFS= read -r bootnum; do
+			[[ -n "\$bootnum" ]] || continue
+			echo "Removing existing EFI boot entry Boot\$bootnum"
+			efibootmgr -b "\$bootnum" -B || true
+		done < <(
+			{
+				if [[ -n "\$boot_partuuid" ]]; then
+					efibootmgr -v | grep -Fi "\$boot_partuuid" | grep -F 'ZFSBootMenu' || true
+				else
+					efibootmgr | grep -F 'ZFSBootMenu' || true
+				fi
+			} | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p' | sort -u
+		)
+	}
+
 	# Install and configure EFI boot manager
 	echo "Configuring EFI boot entries..."
+	remove_existing_zbm_boot_entries
 	efibootmgr -c -d "$BOOT_DISK" -p "$BOOT_PART" -L "ZFSBootMenu (Backup)" -l '\EFI\ZBM\VMLINUZ-BACKUP.EFI'
 	efibootmgr -c -d "$BOOT_DISK" -p "$BOOT_PART" -L "ZFSBootMenu" -l '\EFI\ZBM\VMLINUZ.EFI'
-	efibootmgr -c -d "$BOOT_DISK" -p "$BOOT_PART" -L "ZFSBootMenu" -l '\EFI\BOOT\bootx64.efi'
+	efibootmgr -c -d "$BOOT_DISK" -p "$BOOT_PART" -L "ZFSBootMenu (Fallback)" -l '\EFI\BOOT\bootx64.efi'
 
 	# Hand off DNS management to the installed system after all network-dependent setup is done.
 	if [[ "$install_network_configuration" == "1" ]]; then
