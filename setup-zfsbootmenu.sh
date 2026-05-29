@@ -36,9 +36,6 @@ NETWORK_INTERFACE_MAC=""
 NETWORK_IPV4_CIDR=""
 NETWORK_GATEWAY=""
 NETWORK_DNS_SERVERS=""
-FEDORA_LIVE_INSTALL_MOUNT="/run/install"
-FEDORA_LIVE_INSTALL_TREE=""
-FEDORA_LIVE_INSTALL_MOUNTED="0"
 
 resolve_desktop_dir() {
 	local target_user=""
@@ -103,7 +100,7 @@ detect_target_configuration() {
 			;;
 		*)
 			echo "Unsupported live distribution: $LIVE_DISTRO_ID"
-			echo "Supported live environments: Debian live -> Debian target, Fedora Workstation live -> Fedora target"
+			echo "Supported live environments: Debian live -> Debian target, Fedora Server installer -> Fedora target"
 			return 1
 			;;
 	esac
@@ -407,38 +404,6 @@ remove_zfs_fuse_if_present() {
 	if command -v rpm >/dev/null 2>&1 && rpm -q zfs-fuse >/dev/null 2>&1; then
 		rpm -e --nodeps zfs-fuse
 	fi
-}
-
-prepare_fedora_live_install_tree() {
-	if [[ -n "$FEDORA_LIVE_INSTALL_TREE" ]]; then
-		printf '%s\n' "$FEDORA_LIVE_INSTALL_TREE"
-		return 0
-	fi
-
-	if mountpoint -q "$FEDORA_LIVE_INSTALL_MOUNT"; then
-		FEDORA_LIVE_INSTALL_TREE="$FEDORA_LIVE_INSTALL_MOUNT"
-		printf '%s\n' "$FEDORA_LIVE_INSTALL_TREE"
-		return 0
-	fi
-
-	if mountpoint -q /run/rootfsbase; then
-		FEDORA_LIVE_INSTALL_TREE="/run/rootfsbase"
-		printf '%s\n' "$FEDORA_LIVE_INSTALL_TREE"
-		return 0
-	fi
-
-	if [[ -b /dev/mapper/live-base ]]; then
-		mkdir -p "$FEDORA_LIVE_INSTALL_MOUNT"
-		echo "Mounting Fedora live installation source /dev/mapper/live-base at $FEDORA_LIVE_INSTALL_MOUNT..."
-		mount -o ro /dev/mapper/live-base "$FEDORA_LIVE_INSTALL_MOUNT"
-		FEDORA_LIVE_INSTALL_TREE="$FEDORA_LIVE_INSTALL_MOUNT"
-		FEDORA_LIVE_INSTALL_MOUNTED="1"
-		printf '%s\n' "$FEDORA_LIVE_INSTALL_TREE"
-		return 0
-	fi
-
-	echo "Unable to find the Fedora live installation source. Expected /dev/mapper/live-base or /run/rootfsbase from the Fedora Workstation live image." >&2
-	return 1
 }
 
 get_local_ipv4_addresses() {
@@ -826,7 +791,7 @@ install_host_packages_fedora() {
 	echo "Installing necessary packages"
 	zfs_release_url=$(resolve_fedora_zfs_release_rpm)
 	echo "Resolved Fedora live zfs-release RPM: $zfs_release_url"
-	dnf_install_live install gdisk curl wget dosfstools efibootmgr rsync
+	dnf_install_live install gdisk curl wget dosfstools efibootmgr
 	remove_zfs_fuse_if_present
 	if ! rpm -q zfs-release >/dev/null 2>&1; then
 		dnf_install_live_release_only install "$zfs_release_url"
@@ -917,27 +882,35 @@ setup_base_system_debian() {
 }
 
 setup_base_system_fedora() {
-	local install_tree=""
-	local rsync_info="stats2"
+	local target_base_packages=(
+		@core
+		kernel
+		kernel-devel
+		sudo
+		openssh-server
+		curl
+		dosfstools
+		efibootmgr
+		policycoreutils
+		selinux-policy-targeted
+	)
 
-	echo "Installing base system from the Fedora live image..."
+	echo "Installing Fedora target packages into $MOUNT_POINT with dnf --installroot..."
 	mkdir -p "$MOUNT_POINT"
-	install_tree=$(prepare_fedora_live_install_tree)
-	if [[ -t 1 ]]; then
-		rsync_info="progress2"
-	fi
-	echo "Copying Fedora live system from $install_tree to $MOUNT_POINT..."
-	rsync -pogAXtlHrDx \
-		--stats \
-		--exclude=/boot/efi/* \
-		--exclude=/etc/machine-id \
-		--info="$rsync_info" \
-		"$install_tree/" "$MOUNT_POINT"
+	prepare_runtime_mounts
+	dnf_install_target_release_only install --exclude=dracut-config-rescue "${target_base_packages[@]}"
 	mkdir -p "$MOUNT_POINT/etc"
 	if [[ -e "$MOUNT_POINT/etc/resolv.conf" ]]; then
-		mv "$MOUNT_POINT/etc/resolv.conf" "$MOUNT_POINT/etc/resolv.conf.orig"
+		if [[ "$MOUNT_POINT/etc/resolv.conf" -ef /etc/resolv.conf ]]; then
+			echo "Fedora target resolv.conf already shares the live resolver; saving a standalone copy instead."
+			cp -L /etc/resolv.conf "$MOUNT_POINT/etc/resolv.conf.orig"
+		else
+			mv "$MOUNT_POINT/etc/resolv.conf" "$MOUNT_POINT/etc/resolv.conf.orig"
+			cp -L /etc/resolv.conf "$MOUNT_POINT/etc/resolv.conf"
+		fi
+	else
+		cp -L /etc/resolv.conf "$MOUNT_POINT/etc/resolv.conf"
 	fi
-	cp -L /etc/resolv.conf "$MOUNT_POINT/etc/resolv.conf"
 	cp /etc/hostid "$MOUNT_POINT/etc/hostid"
 }
 
@@ -957,11 +930,12 @@ setup_base_system() {
 }
 
 prepare_runtime_mounts() {
-	mkdir -p "$MOUNT_POINT/proc" "$MOUNT_POINT/sys" "$MOUNT_POINT/dev/pts"
+	mkdir -p "$MOUNT_POINT/proc" "$MOUNT_POINT/sys" "$MOUNT_POINT/dev/pts" "$MOUNT_POINT/run"
 	mountpoint -q "$MOUNT_POINT/proc" || mount -t proc proc "$MOUNT_POINT/proc"
 	mountpoint -q "$MOUNT_POINT/sys" || mount -t sysfs sysfs "$MOUNT_POINT/sys"
 	mountpoint -q "$MOUNT_POINT/dev" || mount -B /dev "$MOUNT_POINT/dev"
 	mountpoint -q "$MOUNT_POINT/dev/pts" || mount -t devpts devpts "$MOUNT_POINT/dev/pts"
+	mountpoint -q "$MOUNT_POINT/run" || mount -B /run "$MOUNT_POINT/run"
 }
 
 prepare_chroot() {
@@ -1136,7 +1110,6 @@ enter_chroot_fedora() {
 	local dns_server=""
 	local install_network_configuration="0"
 	local zfs_release_url=""
-	local kernel_devel_url=""
 	local root_password_hash=""
 	local user_password_hash=""
 
@@ -1158,7 +1131,6 @@ enter_chroot_fedora() {
 	fi
 
 	zfs_release_url=$(resolve_fedora_zfs_release_rpm)
-	kernel_devel_url=$(fedora_kernel_devel_url)
 	if ! command -v openssl >/dev/null 2>&1; then
 		echo "openssl is required to configure Fedora target passwords"
 		return 1
@@ -1166,7 +1138,6 @@ enter_chroot_fedora() {
 	root_password_hash=$(printf '%s' "$ROOT_PASSWORD" | openssl passwd -6 -stdin)
 	user_password_hash=$(printf '%s' "$USER_PASSWORD" | openssl passwd -6 -stdin)
 	echo "Resolved Fedora target zfs-release RPM for chroot: $zfs_release_url"
-	echo "Resolved Fedora target kernel-devel RPM for chroot: $kernel_devel_url"
 
 	echo "Entering chroot environment to configure Fedora system..."
 	chroot $MOUNT_POINT /bin/bash <<-EOF
@@ -1190,24 +1161,11 @@ enter_chroot_fedora() {
 		done
 	}
 
-	remove_installed_packages() {
-		local package=""
-		local installed_packages=()
-		for package in "\$@"; do
-			if rpm -q "\$package" >/dev/null 2>&1; then
-				installed_packages+=("\$package")
-			fi
-		done
-		if [[ "\${#installed_packages[@]}" -gt 0 ]]; then
-			dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --setopt=clean_requirements_on_remove=True --disablerepo=updates remove "\${installed_packages[@]}"
-		fi
-	}
-
 	# Set hostname
 	echo "$HOSTNAME" > /etc/hostname
 	echo "127.0.1.1    $HOSTNAME" >> /etc/hosts
 
-	# Install the ZFS packages inside the copied Fedora system, matching the official guide.
+	# Install the Fedora target packages that are intentionally kept outside the initial installroot bootstrap.
 	echo "Installing Fedora ZFS packages inside chroot..."
 	if rpm -q zfs-fuse >/dev/null 2>&1; then
 		rpm -e --nodeps zfs-fuse
@@ -1215,27 +1173,16 @@ enter_chroot_fedora() {
 	if ! rpm -q zfs-release >/dev/null 2>&1; then
 		dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install "$zfs_release_url"
 	fi
-	if ! rpm -q "kernel-devel-$KERNEL_VERSION" >/dev/null 2>&1; then
-		dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install "$kernel_devel_url"
+	if ! rpm -q kernel-devel >/dev/null 2>&1; then
+		dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install kernel-devel
+	fi
+	if ! rpm -q openssh-server >/dev/null 2>&1; then
+		dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install openssh-server
+	fi
+	if ! rpm -q sudo >/dev/null 2>&1; then
+		dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install sudo
 	fi
 	dnf -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install zfs zfs-dracut
-
-	# The Fedora Workstation live image is copied into the target, so remove its desktop stack.
-	echo "Removing Fedora desktop packages from target install..."
-	remove_installed_packages \
-		gdm \
-		gnome-shell \
-		gnome-session-wayland-session \
-		gnome-session-xsession \
-		gnome-classic-session \
-		gnome-control-center \
-		gnome-software \
-		gnome-tour \
-		nautilus \
-		ptyxis \
-		gnome-terminal \
-		xdg-desktop-portal-gnome \
-		xdg-desktop-portal-gtk
 
 	# Configure locale
 	echo "Configuring locale..."
@@ -1390,6 +1337,7 @@ enter_chroot() {
 
 cleanup_chroot() {
   echo "Cleaning up chroot environment..."
+	umount -l "$MOUNT_POINT/run" 2>/dev/null || true
 	umount -l "$MOUNT_POINT/dev/pts" 2>/dev/null || true
 	umount -l "$MOUNT_POINT/dev" 2>/dev/null || true
 	umount -l "$MOUNT_POINT/sys" 2>/dev/null || true
@@ -1400,9 +1348,6 @@ final_cleanup() {
   echo "Exporting ZFS pool and completing installation..."
   mount | grep -v zfs | tac | awk '/\/mnt/ {print $3}' | \
     xargs -i{} umount -lf {}
-	if [[ "$FEDORA_LIVE_INSTALL_MOUNTED" == "1" ]] && mountpoint -q "$FEDORA_LIVE_INSTALL_MOUNT"; then
-		umount -l "$FEDORA_LIVE_INSTALL_MOUNT" 2>/dev/null || true
-	fi
   zpool export -a
 }
 

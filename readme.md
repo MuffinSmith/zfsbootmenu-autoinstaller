@@ -3,7 +3,7 @@
 This script automates the installation and configuration of a headless ZFSBootMenu system from a supported live installation environment. It now supports these matching live-target pairs:
 
 - Debian live -> Debian target
-- Fedora Workstation live -> Fedora target
+- Fedora Server installer -> Fedora target
 
 ## Prerequisites
 
@@ -13,7 +13,7 @@ This script automates the installation and configuration of a headless ZFSBootMe
 
 ## Features
 
-- Auto-detects Debian live versus Fedora Workstation live
+- Auto-detects Debian live versus Fedora Server installer environments
 - Preserves the existing Debian installation flow
 - Builds a headless target with systemd-networkd and OpenSSH
 - Creates and configures ZFS partitions and filesystems
@@ -24,7 +24,7 @@ This script automates the installation and configuration of a headless ZFSBootMe
 
 1. **Choose a supported live environment**
    Debian live installs Debian.
-   Fedora Workstation live installs Fedora.
+   Fedora Server installer installs Fedora.
 
 2. **Run the script from the live environment**
    For manual testing on this branch, fetch the script from `feature/fedora-support`.
@@ -41,15 +41,17 @@ This script automates the installation and configuration of a headless ZFSBootMe
    ./setup-zfsbootmenu.sh
    ```
 
-   Fedora Workstation live:
+   Fedora Server installer shell:
 
    ```bash
-   sudo -i
+   timedatectl set-ntp true || true
    dnf install -y curl
    curl -fsSLo setup-zfsbootmenu.sh https://raw.githubusercontent.com/MuffinSmith/zfsbootmenu-autoinstaller/feature/fedora-support/setup-zfsbootmenu.sh
    chmod +x setup-zfsbootmenu.sh
    ./setup-zfsbootmenu.sh
    ```
+
+   Use `Ctrl`+`Alt`+`F2` from the installer UI to reach the shell if needed. The installer shell runs as `root`.
 
 3. **Follow prompts**
    - The script will prompt you for:
@@ -82,22 +84,23 @@ This script sets default variables for installation, including:
 - `POOL_NAME`: Name of the ZFS pool (default `zroot`)
 - `KERNEL_VERSION`: The current kernel version, determined automatically
 - `DEBIAN_RELEASE`: Debian target release used when booted from Debian live
-- Fedora target release is auto-detected from the live Fedora Workstation environment
+- Fedora target release is auto-detected from the Fedora Server installer environment
 
 You can modify these defaults directly in the script if needed.
 
 ## Important Notes
 
 - **Warning**: This script will erase all data on the selected disk.
-- **Compatibility**: Supported flows are Debian live -> Debian target and Fedora Workstation live -> Fedora target.
-- **Target profile**: Fedora installs are built as headless systems rather than copying the full Workstation desktop into the target root.
+- **Compatibility**: Supported flows are Debian live -> Debian target and Fedora Server installer -> Fedora target.
+- **Target profile**: Fedora installs are built minimally with `dnf --installroot`; no desktop environment is copied into the target and removed later.
+- **Guide alignment**: The Fedora path intentionally diverges from the official ZFSBootMenu Workstation-live guide so the target starts as a minimal headless system.
 - **Network**: Ensure a working internet connection, as the script will download packages.
 - **Testing**: This branch is intended for manual hardware validation; VM testing was not performed in this workspace.
 
 ## BadUSB Helpers
 
 - [InstallZFSBootMenuDebian.txt](InstallZFSBootMenuDebian.txt) boots Debian live and fetches the installer.
-- [InstallZFSBootMenuFedora.txt](InstallZFSBootMenuFedora.txt) boots Fedora Workstation live and fetches the installer from `feature/fedora-support`.
+- [InstallZFSBootMenuFedora.txt](InstallZFSBootMenuFedora.txt) switches the Fedora Server installer to a shell and bootstraps the installer from `feature/fedora-support`.
 
 ## Troubleshooting
 

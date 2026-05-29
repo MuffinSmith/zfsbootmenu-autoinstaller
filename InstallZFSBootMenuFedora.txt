@@ -1,17 +1,10 @@
-REM Fedora Workstation live -> open terminal -> sync clock/RTC -> bootstrap ZFSBootMenu installer from feature/fedora-support
+REM Fedora Server installer -> switch to tty2 shell -> sync clock/RTC -> bootstrap ZFSBootMenu installer from feature/fedora-support
+REM Assumes the Fedora Server installer has already booted and wired networking is available.
 DEFAULT_DELAY 200
-DELAY 5000
+DELAY 12000
 
-ALT F2
-DELAY 1200
-
-STRING bash -lc 'command -v ptyxis >/dev/null 2>&1 && exec ptyxis; command -v gnome-terminal >/dev/null 2>&1 && exec gnome-terminal; command -v kgx >/dev/null 2>&1 && exec kgx; exec xterm'
-ENTER
+CTRL ALT F2
 DELAY 2500
 
-STRING sudo -i
-ENTER
-DELAY 1200
-
-STRING { timedatectl set-ntp true > /dev/null 2>&1 && until [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ]; do sleep 1; done; } || { http_date="$(exec 3<>/dev/tcp/download.fedoraproject.org/80; printf 'HEAD / HTTP/1.1\r\nHost: download.fedoraproject.org\r\nConnection: close\r\n\r\n' >&3; tr -d '\r' <&3 | sed -n 's/^Date: //p' | head -n1)"; [ -n "$http_date" ] && date -u -s "$http_date"; } || echo "Clock sync unavailable; continuing with current time"; hwclock --systohc 2>/dev/null || true; dnf install -y curl && curl -fsSLo setup-zfsbootmenu.sh https://raw.githubusercontent.com/MuffinSmith/zfsbootmenu-autoinstaller/feature/fedora-support/setup-zfsbootmenu.sh && chmod +x setup-zfsbootmenu.sh && ./setup-zfsbootmenu.sh
+STRING nmcli networking on > /dev/null 2>&1 || true; { timedatectl set-ntp true > /dev/null 2>&1 && until [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ]; do sleep 1; done; } || { http_date="$(exec 3<>/dev/tcp/download.fedoraproject.org/80; printf 'HEAD / HTTP/1.1\r\nHost: download.fedoraproject.org\r\nConnection: close\r\n\r\n' >&3; tr -d '\r' <&3 | sed -n 's/^Date: //p' | head -n1)"; [ -n "$http_date" ] && date -u -s "$http_date"; } || echo "Clock sync unavailable; continuing with current time"; hwclock --systohc 2>/dev/null || true; dnf install -y curl && curl -fsSLo setup-zfsbootmenu.sh https://raw.githubusercontent.com/MuffinSmith/zfsbootmenu-autoinstaller/feature/fedora-support/setup-zfsbootmenu.sh && chmod +x setup-zfsbootmenu.sh && ./setup-zfsbootmenu.sh
 ENTER
