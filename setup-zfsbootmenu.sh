@@ -101,7 +101,7 @@ detect_target_configuration() {
 			;;
 		*)
 			echo "Unsupported live distribution: $LIVE_DISTRO_ID"
-			echo "Supported live environments: Debian live -> Debian target, Fedora Server installer -> Fedora target"
+			echo "Supported live environments: Debian live -> Debian target, Fedora Workstation Live -> Fedora target"
 			return 1
 			;;
 	esac
@@ -330,7 +330,9 @@ resolve_fedora_package_manager() {
 		fi
 	done
 
-	echo "Unable to find a Fedora package manager (dnf, dnf5, or microdnf)" >&2
+	echo "Unable to find a Fedora package manager (dnf, dnf5, or microdnf)." >&2
+	echo "This Fedora environment cannot install the live ZFS prerequisites." >&2
+	echo "Boot Fedora Workstation Live and rerun the installer; the target will still be built as a minimal headless Fedora system." >&2
 	return 1
 }
 
@@ -345,7 +347,9 @@ install_log_sharing_packages() {
 			apt_get_safe install -y samba
 			;;
 		fedora)
-			fedora_pkg_manager=$(resolve_fedora_package_manager)
+			if ! fedora_pkg_manager=$(resolve_fedora_package_manager); then
+				return 1
+			fi
 			"$fedora_pkg_manager" install -y samba
 			;;
 		*)
@@ -357,30 +361,58 @@ install_log_sharing_packages() {
 
 dnf_install_live() {
 	local fedora_pkg_manager=""
-	fedora_pkg_manager=$(resolve_fedora_package_manager)
+	if ! fedora_pkg_manager=$(resolve_fedora_package_manager); then
+		return 1
+	fi
 	echo "Running Fedora live package command: $fedora_pkg_manager -y --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False $*"
 	"$fedora_pkg_manager" -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False "$@"
 }
 
 dnf_install_live_release_only() {
 	local fedora_pkg_manager=""
-	fedora_pkg_manager=$(resolve_fedora_package_manager)
+	if ! fedora_pkg_manager=$(resolve_fedora_package_manager); then
+		return 1
+	fi
 	echo "Running Fedora live release-only command: $fedora_pkg_manager -y --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False --disablerepo=updates $*"
 	"$fedora_pkg_manager" -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates "$@"
 }
 
 dnf_install_target() {
 	local fedora_pkg_manager=""
-	fedora_pkg_manager=$(resolve_fedora_package_manager)
+	if ! fedora_pkg_manager=$(resolve_fedora_package_manager); then
+		return 1
+	fi
 	echo "Running Fedora installroot command: $fedora_pkg_manager -y --installroot $MOUNT_POINT --use-host-config --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False $*"
 	"$fedora_pkg_manager" -y --installroot "$MOUNT_POINT" --use-host-config --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False "$@"
 }
 
 dnf_install_target_release_only() {
 	local fedora_pkg_manager=""
-	fedora_pkg_manager=$(resolve_fedora_package_manager)
+	if ! fedora_pkg_manager=$(resolve_fedora_package_manager); then
+		return 1
+	fi
 	echo "Running Fedora installroot release-only command: $fedora_pkg_manager -y --installroot $MOUNT_POINT --use-host-config --releasever=$FEDORA_RELEASE --setopt=install_weak_deps=False --disablerepo=updates $*"
 	"$fedora_pkg_manager" -y --installroot "$MOUNT_POINT" --use-host-config --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates "$@"
+}
+
+dnf_target_package_available() {
+	local fedora_pkg_manager=""
+	local package_name="$1"
+
+	if ! fedora_pkg_manager=$(resolve_fedora_package_manager); then
+		return 1
+	fi
+
+	"$fedora_pkg_manager" --installroot "$MOUNT_POINT" --use-host-config --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates info "$package_name" >/dev/null 2>&1
+}
+
+install_optional_fedora_target_package() {
+	local package_name="$1"
+
+	if dnf_target_package_available "$package_name"; then
+		echo "Installing optional Fedora target package: $package_name"
+		dnf_install_target_release_only install "$package_name"
+	fi
 }
 
 url_exists() {
@@ -930,6 +962,8 @@ setup_base_system_fedora() {
 	mkdir -p "$MOUNT_POINT"
 	prepare_runtime_mounts
 	dnf_install_target_release_only install --exclude=dracut-config-rescue "${target_base_packages[@]}"
+	install_optional_fedora_target_package fedora-release-server
+	install_optional_fedora_target_package fedora-release-identity-server
 	mkdir -p "$MOUNT_POINT/etc"
 	if [[ -e "$MOUNT_POINT/etc/resolv.conf" ]]; then
 		if [[ "$MOUNT_POINT/etc/resolv.conf" -ef /etc/resolv.conf ]]; then
@@ -1191,6 +1225,7 @@ enter_chroot_fedora() {
 			fi
 		done
 		echo "[chroot] Unable to find a Fedora package manager (dnf, dnf5, or microdnf)"
+		echo "[chroot] The Fedora target bootstrap is incomplete; aborting before package installation."
 		return 1
 	}
 
@@ -1198,7 +1233,7 @@ enter_chroot_fedora() {
 		"\$FEDORA_CHROOT_PKG_MANAGER" -y --releasever="$FEDORA_RELEASE" --setopt=install_weak_deps=False --disablerepo=updates install "\$@"
 	}
 
-	FEDORA_CHROOT_PKG_MANAGER=\$(resolve_chroot_fedora_package_manager)
+	FEDORA_CHROOT_PKG_MANAGER=\$(resolve_chroot_fedora_package_manager) || exit 1
 	echo "Using Fedora chroot package manager: \$FEDORA_CHROOT_PKG_MANAGER"
 
 	clear_account_locks() {
