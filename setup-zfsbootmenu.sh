@@ -946,12 +946,85 @@ install_host_packages() {
 	esac
 }
 
+release_disk_users() {
+	local disk="$1"
+	local device=""
+	local mount_target=""
+	local swap_device=""
+	local pv_name=""
+	local vg_name=""
+	local -a device_list=()
+	local -a vgs_to_deactivate=()
+
+	echo "Releasing active mounts, swap, and volume groups on $disk..."
+	while IFS= read -r device; do
+		[[ -n "$device" ]] || continue
+		device_list+=("$device")
+	done < <(lsblk -lnpo NAME "$disk" 2>/dev/null || true)
+
+	if [[ ${#device_list[@]} -eq 0 ]]; then
+		device_list=("$disk")
+	fi
+
+	for device in "${device_list[@]}"; do
+		while IFS= read -r mount_target; do
+			[[ -n "$mount_target" ]] || continue
+			echo "Unmounting $device from $mount_target"
+			umount -R "$mount_target" 2>/dev/null || umount -l "$mount_target" 2>/dev/null || true
+		done < <(findmnt -rn -S "$device" -o TARGET 2>/dev/null || true)
+	done
+
+	if [[ -r /proc/swaps ]]; then
+		while read -r swap_device _; do
+			[[ -z "$swap_device" || "$swap_device" == "Filename" ]] && continue
+			for device in "${device_list[@]}"; do
+				if [[ "$swap_device" == "$device" ]]; then
+					echo "Disabling swap on $swap_device"
+					swapoff "$swap_device" 2>/dev/null || true
+					break
+				fi
+			done
+		done < /proc/swaps
+	fi
+
+	if command -v pvs >/dev/null 2>&1 && command -v vgchange >/dev/null 2>&1; then
+		while IFS='|' read -r pv_name vg_name; do
+			pv_name="${pv_name#${pv_name%%[![:space:]]*}}"
+			pv_name="${pv_name%${pv_name##*[![:space:]]}}"
+			vg_name="${vg_name#${vg_name%%[![:space:]]*}}"
+			vg_name="${vg_name%${vg_name##*[![:space:]]}}"
+			[[ -n "$pv_name" && -n "$vg_name" ]] || continue
+			for device in "${device_list[@]}"; do
+				if [[ "$pv_name" == "$device" ]]; then
+					vgs_to_deactivate+=("$vg_name")
+					break
+				fi
+			done
+		done < <(pvs --noheadings -o pv_name,vg_name --separator '|' 2>/dev/null || true)
+
+		if [[ ${#vgs_to_deactivate[@]} -gt 0 ]]; then
+			mapfile -t vgs_to_deactivate < <(printf '%s\n' "${vgs_to_deactivate[@]}" | sort -u)
+			for vg_name in "${vgs_to_deactivate[@]}"; do
+				[[ -n "$vg_name" ]] || continue
+				echo "Deactivating volume group $vg_name"
+				vgchange -an "$vg_name" >/dev/null 2>&1 || vgchange -an "$vg_name" || true
+			done
+		fi
+	fi
+
+	udevadm settle 2>/dev/null || true
+}
+
 partition_disk() {
   echo "Partitioning disk $POOL_DISK..."
-	zpool labelclear -f "$POOL_DISK" 2>/dev/null || true
-	wipefs -a "$POOL_DISK"
+	release_disk_users "$POOL_DISK"
 	if [[ "$BOOT_DISK" != "$POOL_DISK" ]]; then
-		wipefs -a "$BOOT_DISK"
+		release_disk_users "$BOOT_DISK"
+	fi
+	zpool labelclear -f "$POOL_DISK" 2>/dev/null || true
+	wipefs -af "$POOL_DISK"
+	if [[ "$BOOT_DISK" != "$POOL_DISK" ]]; then
+		wipefs -af "$BOOT_DISK"
 	fi
 
 	sgdisk --zap-all "$POOL_DISK"
