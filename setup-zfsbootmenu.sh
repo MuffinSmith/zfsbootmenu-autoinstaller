@@ -713,6 +713,56 @@ prepare_host_efi_support() {
 	fi
 }
 
+secure_boot_enabled() {
+	local secure_boot_var="/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+	local secure_boot_byte=""
+	local mokutil_state=""
+
+	if [[ -r "$secure_boot_var" ]] && command -v od >/dev/null 2>&1; then
+		secure_boot_byte=$(od -An -t u1 -j4 -N1 "$secure_boot_var" 2>/dev/null | tr -d '[:space:]')
+		if [[ "$secure_boot_byte" == "1" ]]; then
+			return 0
+		fi
+		if [[ "$secure_boot_byte" == "0" ]]; then
+			return 1
+		fi
+	fi
+
+	if command -v mokutil >/dev/null 2>&1; then
+		mokutil_state=$(mokutil --sb-state 2>/dev/null || true)
+		if printf '%s\n' "$mokutil_state" | grep -qi 'SecureBoot enabled'; then
+			return 0
+		fi
+	fi
+
+	return 1
+}
+
+print_secure_boot_zfs_guidance() {
+	echo "Secure Boot is enabled on this machine."
+	echo "This installer must load the ZFS kernel module in the live environment, but the DKMS-built ZFS module is not trusted by Secure Boot until a Machine Owner Key is enrolled."
+	echo "Disable Secure Boot in firmware and reboot the live media before rerunning this installer."
+	echo "If you need to keep Secure Boot enabled, manual MOK enrollment is required and is not automated by this installer."
+}
+
+load_live_zfs_module() {
+	local modprobe_output=""
+
+	echo "Loading ZFS module for the live environment"
+	if modprobe_output=$(modprobe zfs 2>&1); then
+		return 0
+	fi
+
+	if printf '%s\n' "$modprobe_output" | grep -qi 'Key was rejected by service'; then
+		echo "$modprobe_output"
+		print_secure_boot_zfs_guidance
+		return 1
+	fi
+
+	echo "$modprobe_output"
+	return 1
+}
+
 install_live_kernel_headers() {
 	local header_package="linux-headers-$KERNEL_VERSION"
 
@@ -847,20 +897,28 @@ configure_package_sources() {
 
 install_host_packages_debian() {
 	echo "Installing necessary packages"
+	prepare_host_efi_support
+	if secure_boot_enabled; then
+		print_secure_boot_zfs_guidance
+		return 1
+	fi
 	quiesce_apt_background_tasks
 	apt_get_safe update
 	apt_get_safe install -y debootstrap gdisk dkms curl
 	install_live_kernel_headers
 	apt_get_safe install -y dosfstools efibootmgr zfsutils-linux
-	echo "Loading ZFS module for the live environment"
-	modprobe zfs
-	prepare_host_efi_support
+	load_live_zfs_module
 }
 
 install_host_packages_fedora() {
 	local zfs_release_url=""
 
 	echo "Installing necessary packages"
+	prepare_host_efi_support
+	if secure_boot_enabled; then
+		print_secure_boot_zfs_guidance
+		return 1
+	fi
 	zfs_release_url=$(resolve_fedora_zfs_release_rpm)
 	echo "Resolved Fedora live zfs-release RPM: $zfs_release_url"
 	dnf_install_live install gdisk curl wget dosfstools efibootmgr
@@ -870,9 +928,7 @@ install_host_packages_fedora() {
 	fi
 	dnf_install_live_release_only install "$(fedora_kernel_devel_url)"
 	dnf_install_live_release_only install zfs
-	echo "Loading ZFS module for the live environment"
-	modprobe zfs
-	prepare_host_efi_support
+	load_live_zfs_module
 }
 
 install_host_packages() {
