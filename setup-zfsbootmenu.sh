@@ -740,9 +740,9 @@ secure_boot_enabled() {
 
 print_secure_boot_zfs_guidance() {
 	echo "Secure Boot is enabled on this machine."
-	echo "The live ZFS module path will be attempted, but the final module load may still require a trusted MOK or signed ZFS package."
-	echo "If modprobe zfs reports 'Key was rejected by service', reboot once into the firmware/MOK Manager flow and enroll the key before rerunning this installer."
-	echo "This installer now tries the Fedora path without aborting first, so the live session can verify whether the signed ZFS modules are usable."
+	echo "The installer will now generate a temporary MOK certificate, sign the ZFSBootMenu EFI image, and create a live-session MOK enrollment request."
+	echo "If modprobe zfs reports 'Key was rejected by service', reboot once into the firmware/MOK Manager flow and accept the pending MOK key before retrying the EFI entry."
+	echo "This installer now keeps the Fedora path alive under Secure Boot instead of aborting on the first warning."
 }
 
 load_live_zfs_module() {
@@ -1156,6 +1156,7 @@ enter_chroot_debian() {
 	local networkd_mode_line=""
 	local dns_server=""
 	local install_network_configuration="0"
+	local secure_boot_state=0
 
 	if [[ ( "$NETWORK_MODE" == "dhcp" || "$NETWORK_MODE" == "static" ) && -n "$NETWORK_INTERFACE_MAC" ]]; then
 		install_network_configuration="1"
@@ -1174,6 +1175,7 @@ enter_chroot_debian() {
 		networkd_config+="IPv6AcceptRA=yes"$'\n'
 	fi
 
+	export ZBM_SECURE_BOOT="$secure_boot_state"
 	echo "Entering chroot environment to configure Debian system..."
 	chroot $MOUNT_POINT /bin/bash <<-EOF
 	set -Eeo pipefail
@@ -1206,7 +1208,7 @@ enter_chroot_debian() {
 	export DEBIAN_FRONTEND=noninteractive
 	apt update
 	apt install -y locales keyboard-configuration console-setup
-	apt install -y linux-headers-amd64 linux-image-amd64 zfs-initramfs dosfstools efibootmgr curl
+	apt install -y linux-headers-amd64 linux-image-amd64 zfs-initramfs dosfstools efibootmgr curl sbsigntools openssl
 	
 	echo "REMAKE_INITRD=yes" > /etc/dkms/zfs.conf
 	
@@ -1294,6 +1296,28 @@ $networkd_config
 	curl -o /boot/efi/EFI/ZBM/VMLINUZ.EFI -L https://get.zfsbootmenu.org/efi
 	cp /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI
 	cp /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/BOOT/bootx64.efi
+
+	sign_zbm_efi_images() {
+		local mok_dir="/boot/efi/EFI/ZBM/mok"
+		mkdir -p "\$mok_dir"
+		if [[ ! -f "\$mok_dir/zbm-mok.key" || ! -f "\$mok_dir/zbm-mok.crt" ]]; then
+			openssl req -new -x509 -newkey rsa:2048 -keyout "\$mok_dir/zbm-mok.key" -out "\$mok_dir/zbm-mok.crt" -nodes -days 3650 -subj '/CN=ZFSBootMenu MOK/' >/dev/null 2>&1
+			openssl x509 -in "\$mok_dir/zbm-mok.crt" -outform DER -out "\$mok_dir/zbm-mok.der" >/dev/null 2>&1
+		fi
+		for image in /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI /boot/efi/EFI/BOOT/bootx64.efi; do
+			[[ -f "\$image" ]] || continue
+			if ! sbsign --key "\$mok_dir/zbm-mok.key" --cert "\$mok_dir/zbm-mok.crt" --output "\$image.signed" "\$image" >/dev/null 2>&1; then
+				echo "[chroot] Unable to sign \$image with the temporary MOK key; continuing with the unsigned image."
+				continue
+			fi
+			mv -f "\$image.signed" "\$image"
+		done
+	}
+
+	if [[ "${ZBM_SECURE_BOOT:-0}" == "1" ]]; then
+		echo "Signing ZFSBootMenu EFI images with a temporary Secure Boot MOK key..."
+		sign_zbm_efi_images || true
+	fi
 	
 	# Mount EFI variables if needed
 	echo "Mounting efivarfs for boot entry setup..."
@@ -1342,6 +1366,7 @@ enter_chroot_fedora() {
 	local zfs_release_url=""
 	local root_password_hash=""
 	local user_password_hash=""
+	local secure_boot_state=0
 
 	if [[ ( "$NETWORK_MODE" == "dhcp" || "$NETWORK_MODE" == "static" ) && -n "$NETWORK_INTERFACE_MAC" ]]; then
 		install_network_configuration="1"
@@ -1360,6 +1385,10 @@ enter_chroot_fedora() {
 		networkd_config+="IPv6AcceptRA=yes"$'\n'
 	fi
 
+	if secure_boot_enabled; then
+		secure_boot_state=1
+	fi
+
 	zfs_release_url=$(resolve_fedora_zfs_release_rpm)
 	if ! command -v openssl >/dev/null 2>&1; then
 		echo "openssl is required to configure Fedora target passwords"
@@ -1369,6 +1398,7 @@ enter_chroot_fedora() {
 	user_password_hash=$(printf '%s' "$USER_PASSWORD" | openssl passwd -6 -stdin)
 	echo "Resolved Fedora target zfs-release RPM for chroot: $zfs_release_url"
 
+	export ZBM_SECURE_BOOT="$secure_boot_state"
 	echo "Entering chroot environment to configure Fedora system..."
 	chroot $MOUNT_POINT /bin/bash <<-EOF
 	set -Eeo pipefail
@@ -1463,6 +1493,12 @@ enter_chroot_fedora() {
 	fi
 	if ! rpm -q openssh-server >/dev/null 2>&1; then
 		fedora_chroot_install openssh-server
+	fi
+	if ! rpm -q sbsigntools >/dev/null 2>&1; then
+		fedora_chroot_install sbsigntools
+	fi
+	if ! rpm -q openssl >/dev/null 2>&1; then
+		fedora_chroot_install openssl
 	fi
 	if ! rpm -q sudo >/dev/null 2>&1; then
 		fedora_chroot_install sudo
@@ -1581,6 +1617,28 @@ $networkd_config
 	cp /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI
 	cp /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/BOOT/bootx64.efi
 
+	sign_zbm_efi_images() {
+		local mok_dir="/boot/efi/EFI/ZBM/mok"
+		mkdir -p "\$mok_dir"
+		if [[ ! -f "\$mok_dir/zbm-mok.key" || ! -f "\$mok_dir/zbm-mok.crt" ]]; then
+			openssl req -new -x509 -newkey rsa:2048 -keyout "\$mok_dir/zbm-mok.key" -out "\$mok_dir/zbm-mok.crt" -nodes -days 3650 -subj '/CN=ZFSBootMenu MOK/' >/dev/null 2>&1
+			openssl x509 -in "\$mok_dir/zbm-mok.crt" -outform DER -out "\$mok_dir/zbm-mok.der" >/dev/null 2>&1
+		fi
+		for image in /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI /boot/efi/EFI/BOOT/bootx64.efi; do
+			[[ -f "\$image" ]] || continue
+			if ! sbsign --key "\$mok_dir/zbm-mok.key" --cert "\$mok_dir/zbm-mok.crt" --output "\$image.signed" "\$image" >/dev/null 2>&1; then
+				echo "[chroot] Unable to sign \$image with the temporary MOK key; continuing with the unsigned image."
+				continue
+			fi
+			mv -f "\$image.signed" "\$image"
+		done
+	}
+
+	if [[ "${ZBM_SECURE_BOOT:-0}" == "1" ]]; then
+		echo "Signing ZFSBootMenu EFI images with a temporary Secure Boot MOK key..."
+		sign_zbm_efi_images || true
+	fi
+
 	# Mount EFI variables if needed
 	echo "Mounting efivarfs for boot entry setup..."
 	mount -t efivarfs efivarfs /sys/firmware/efi/efivars
@@ -1643,6 +1701,33 @@ enter_chroot() {
 	esac
 }
 
+import_mok_certificate() {
+	local cert_file="${MOUNT_POINT}/boot/efi/EFI/ZBM/mok/zbm-mok.der"
+	local mok_password="${MOK_PASSWORD:-zfsbootmenu}"
+	local import_log="${MOUNT_POINT}/boot/efi/EFI/ZBM/mok/mokutil-import.log"
+
+	if ! secure_boot_enabled; then
+		return 0
+	fi
+	if [[ ! -f "$cert_file" ]]; then
+		echo "No temporary Secure Boot MOK certificate was generated under $cert_file."
+		return 0
+	fi
+	if ! command -v mokutil >/dev/null 2>&1; then
+		echo "mokutil is not available in the live session; install it to complete MOK enrollment."
+		return 0
+	fi
+
+	echo "Creating the live-session MOK enrollment request..."
+	if printf '%s\n%s\n' "$mok_password" "$mok_password" | mokutil --import "$cert_file" >"$import_log" 2>&1; then
+		echo "MOK enrollment request created. Reboot once and accept it in the firmware MOK Manager prompt, then boot ZFSBootMenu again."
+	else
+		echo "Automatic MOK enrollment request creation failed. You can run this manually from the live session:"
+		echo "  mokutil --import $cert_file"
+		cat "$import_log" 2>/dev/null || true
+	fi
+}
+
 cleanup_chroot() {
   echo "Cleaning up chroot environment..."
 	umount -l "$MOUNT_POINT/run" 2>/dev/null || true
@@ -1678,6 +1763,7 @@ export_import_zpool
 setup_base_system
 prepare_chroot
 enter_chroot
+import_mok_certificate
 cleanup_chroot
 final_cleanup
 
