@@ -740,9 +740,9 @@ secure_boot_enabled() {
 
 print_secure_boot_zfs_guidance() {
 	echo "Secure Boot is enabled on this machine."
-	echo "This installer must load the ZFS kernel module in the live environment, but the DKMS-built ZFS module is not trusted by Secure Boot until a Machine Owner Key is enrolled."
-	echo "Disable Secure Boot in firmware and reboot the live media before rerunning this installer."
-	echo "If you need to keep Secure Boot enabled, manual MOK enrollment is required and is not automated by this installer."
+	echo "The live ZFS module path will be attempted, but the final module load may still require a trusted MOK or signed ZFS package."
+	echo "If modprobe zfs reports 'Key was rejected by service', reboot once into the firmware/MOK Manager flow and enroll the key before rerunning this installer."
+	echo "This installer now tries the Fedora path without aborting first, so the live session can verify whether the signed ZFS modules are usable."
 }
 
 load_live_zfs_module() {
@@ -900,7 +900,6 @@ install_host_packages_debian() {
 	prepare_host_efi_support
 	if secure_boot_enabled; then
 		print_secure_boot_zfs_guidance
-		return 1
 	fi
 	quiesce_apt_background_tasks
 	apt_get_safe update
@@ -917,11 +916,10 @@ install_host_packages_fedora() {
 	prepare_host_efi_support
 	if secure_boot_enabled; then
 		print_secure_boot_zfs_guidance
-		return 1
 	fi
 	zfs_release_url=$(resolve_fedora_zfs_release_rpm)
 	echo "Resolved Fedora live zfs-release RPM: $zfs_release_url"
-	dnf_install_live install gdisk curl wget dosfstools efibootmgr
+	dnf_install_live install gdisk curl wget dosfstools efibootmgr mokutil
 	remove_zfs_fuse_if_present
 	if ! rpm -q zfs-release >/dev/null 2>&1; then
 		dnf_install_live_release_only install "$zfs_release_url"
